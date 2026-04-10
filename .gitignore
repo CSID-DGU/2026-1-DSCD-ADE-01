@@ -1,0 +1,31 @@
+# 환경 설정
+.env
+*.json
+!package.json
+!firebase.json
+
+# 데이터 (용량 큼)
+data/raw/
+evaluation/results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+web/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# GCP
+google-cloud-sdk/
