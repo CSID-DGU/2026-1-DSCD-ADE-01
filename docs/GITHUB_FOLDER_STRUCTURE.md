@@ -144,7 +144,9 @@
 │   └── run_evaluation.sh                    # 오프라인 평가 실행
 │
 ├── tests/                               # 테스트
-│   ├── conftest.py                          # pytest 공통 fixture
+│   ├── conftest.py                          # pytest 공통 fixture (env 기본값 주입 등)
+│   ├── shared/
+│   │   └── test_config.py                   # shared/config 단위 테스트
 │   ├── pipeline/
 │   │   ├── test_query_expansion.py
 │   │   ├── test_retrieval.py
@@ -392,20 +394,46 @@ RAG 파이프라인의 성능을 검증하는 오프라인 평가 코드.
 
 ### 6.1 `shared/config.py`
 
-모든 모듈이 참조하는 환경변수와 설정값을 중앙 관리.
+모든 모듈이 참조하는 환경변수와 설정값을 중앙 관리. `pydantic-settings`의
+`BaseSettings`를 기반으로 하며, **모듈 import 시점에 1회 로드(fail-fast)**
+하고 모든 설정 오류는 `ConfigError`로 통일된다.
 
 ```python
-# 예시 — 실제 구현과 다를 수 있음
-import os
-from dotenv import load_dotenv
+# 요약 — 실제 구현은 shared/config.py 참조
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
 
-GCP_PROJECT_ID = os.environ["GCP_PROJECT_ID"]       # dcsd-ade
-GCP_LOCATION = os.environ["GCP_LOCATION"]            # us-central1
-CLOUD_SQL_CONNECTION = os.environ["CLOUD_SQL_CONNECTION"]
-GCS_BUCKET = os.environ["GCS_BUCKET"]
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+class ConfigError(RuntimeError):
+    """모든 설정 관련 오류의 단일 타입."""
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8",
+        extra="ignore", case_sensitive=False,
+    )
+    gcp_project_id: str
+    gcp_location: str
+    cloud_sql_connection: str
+    db_user: str
+    db_password: str
+    db_name: str
+    gcs_bucket: str
+    gemini_model: str = "gemini-2.5-flash"
+
+
+settings = load_settings()  # fail-fast at import
+
+# 편의용 re-export
+GCP_PROJECT_ID = settings.gcp_project_id
+GEMINI_MODEL = settings.gemini_model
+```
+
+사용:
+
+```python
+from shared.config import settings          # 권장
+from shared.config import GCP_PROJECT_ID    # 편의
 ```
 
 ### 6.2 `shared/db/vector_store.py`
