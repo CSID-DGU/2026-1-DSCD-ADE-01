@@ -130,6 +130,15 @@ class GeminiClient:
         except Exception as exc:
             raise LLMError(str(exc)) from exc
 
+        usage = response.usage_metadata
+        if usage is not None:
+            print(
+                f"[Gemini] tokens  in={usage.prompt_token_count or 0}"
+                f"  out={usage.candidates_token_count or 0}"
+                f"  total={usage.total_token_count or 0}"
+                f"  (model={model or self._default_model})"
+            )
+
         return response.parsed if response_schema is not None else response.text
 
 
