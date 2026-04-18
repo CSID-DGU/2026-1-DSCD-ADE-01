@@ -3,8 +3,10 @@ import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from openpyxl import Workbook
-
-OC = "ADE"
+import os
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent.parent / ".env") # 프로젝트 루트의 .env 로드
+OC = os.getenv("LAW_API_KEY")
 BASE_URL = "https://www.law.go.kr/DRF"
 
 # 항내용 앞 원기호(①②③...) 제거 패턴

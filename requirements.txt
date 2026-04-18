@@ -7,3 +7,4 @@ sqlalchemy>=2.0
 google-cloud-storage>=2.0
 requests
 openpyxl
+python-dotenv
