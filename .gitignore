@@ -6,6 +6,7 @@
 
 # 데이터 (용량 큼)
 data/raw/
+data/lawtalk_qa_filtered/
 evaluation/results/
 
 # Python
