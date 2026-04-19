@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from pydantic import BaseModel, Field
+
 
 TARGET_LAWS = [
     "민법",
@@ -20,12 +22,34 @@ TARGET_LAWS = [
 ]
 
 SPECIAL_KEYWORDS = ["특약", "특약사항", "특약조항", "특약 조항"]
+RULE_BASED_FILTERED_FILES = [
+    "qa_both.json",
+    "qa_law_only.json",
+    "qa_precedent_only.json",
+]
+
+
+class ExtractedClausesResult(BaseModel):
+    """rule-based 특약 후보에서 실제 계약서 특약 문구를 고른 결과."""
+
+    extracted_clauses: list[str] = Field(
+        description=(
+            "special_clauses 안에서 실제 계약서에 존재할 만한 특약 문구만 넣습니다. "
+            "질문, 상담 요청, 배경 설명, 법률 판단 질문은 제외합니다."
+        )
+    )
 
 
 def add_unique(items, value):
     """리스트에 같은 값이 없을 때만 값을 추가한다."""
     if value not in items:
         items.append(value)
+
+
+def debug_log(enabled, message):
+    """디버그 모드일 때만 추적 로그를 출력한다."""
+    if enabled:
+        print(f"[lawtalk_qa][debug] {message}", flush=True)
 
 
 def make_law_reference(law_name, article_number, sub_article_number):
@@ -170,6 +194,38 @@ def extract_special_clauses(question_body):
     return special_clauses
 
 
+def build_clause_postprocess_prompt(special_clauses):
+    """1차 rule-based 결과의 special_clauses만 사용해 특약 후처리 프롬프트를 만든다."""
+    lines = [
+        "다음 special_clauses 목록에서 실제 계약서에 존재할 만한 특약 문구만 골라주세요.",
+        "규칙:",
+        "1. 질문자의 질문, 상담 요청, 배경 설명은 제외합니다.",
+        "2. 계약서에 실제로 적혀 있을 만한 약정 문구만 extracted_clauses에 넣습니다.",
+        "3. 원문에 없는 새로운 내용을 만들지 않습니다.",
+        "4. 문장을 다듬더라도 의미를 바꾸지 않습니다.",
+        "5. 실제 특약 문구가 없으면 extracted_clauses에 빈 리스트를 넣습니다.",
+        "",
+        "special_clauses:",
+    ]
+
+    for index, clause in enumerate(special_clauses, start=1):
+        lines.append(f"{index}. {clause}")
+
+    return "\n".join(lines)
+
+
+def extract_clauses_from_special_clauses_with_llm(special_clauses):
+    """1차 rule-based special_clauses에서 실제 계약서 특약 문구만 LLM으로 추출한다."""
+    from shared.llm.gemini_client import gemini_client
+
+    prompt = build_clause_postprocess_prompt(special_clauses)
+    result = gemini_client.generate(
+        prompt,
+        response_schema=ExtractedClausesResult,
+    )
+    return result.extracted_clauses
+
+
 def process_record(record):
     """로톡 QA 레코드 하나를 필터링하고 출력 형식으로 바꾼다."""
     question_body = record.get("question_body", "")
@@ -211,6 +267,126 @@ def write_json(file_path, records):
     """레코드 목록을 JSON 파일로 저장한다."""
     with open(file_path, "w", encoding="utf-8") as file:
         json.dump(records, file, ensure_ascii=False, indent=2)
+
+
+def load_rule_based_filtered_records(input_dir):
+    """1차 rule-based 결과 세 파일을 읽고 source 메타데이터를 붙인다."""
+    input_path = Path(input_dir)
+    records = []
+
+    for source_file in RULE_BASED_FILTERED_FILES:
+        source_path = input_path / source_file
+        source_records = read_records_from_file(source_path)
+
+        for source_position, record in enumerate(source_records, start=1):
+            merged_record = dict(record)
+            merged_record["source_file"] = source_file
+            merged_record["source_position"] = source_position
+            records.append(merged_record)
+
+    return records
+
+
+def process_rule_based_filtered_clauses(
+    input_dir="data/lawtalk_qa_filtered",
+    output_file=None,
+    clause_extractor=None,
+    debug=False,
+    limit=None,
+):
+    """1차 rule-based 결과를 LLM으로 후처리하고 매 레코드마다 결과 파일을 갱신한다."""
+    input_path = Path(input_dir)
+    output_path = (
+        Path(output_file)
+        if output_file is not None
+        else input_path / "qa_clauses_processed.json"
+    )
+    extractor = clause_extractor or extract_clauses_from_special_clauses_with_llm
+    source_records = load_rule_based_filtered_records(input_path)
+
+    if output_path.exists():
+        processed_records = read_records_from_file(output_path)
+    else:
+        processed_records = []
+
+    processed_keys = {
+        (record.get("source_file"), record.get("source_position"))
+        for record in processed_records
+    }
+    processed_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    debug_log(
+        debug,
+        (
+            f"clause_postprocess_start input_dir={input_path} "
+            f"output_file={output_path} limit={limit}"
+        ),
+    )
+
+    for record in source_records:
+        key = (record["source_file"], record["source_position"])
+
+        if key in processed_keys:
+            skipped_count = skipped_count + 1
+            debug_log(
+                debug,
+                (
+                    f"clause_postprocess_skip source_file={record['source_file']} "
+                    f"source_position={record['source_position']} reason=already_processed"
+                ),
+            )
+            continue
+
+        if limit is not None and processed_count >= limit:
+            debug_log(debug, f"clause_postprocess_limit_reached limit={limit}")
+            break
+
+        special_clauses = record.get("special_clauses", [])
+        debug_log(
+            debug,
+            (
+                f"clause_postprocess_start_record source_file={record['source_file']} "
+                f"source_position={record['source_position']} "
+                f"special_clause_count={len(special_clauses)}"
+            ),
+        )
+
+        output_record = dict(record)
+
+        try:
+            output_record["extracted_clauses"] = extractor(special_clauses)
+            output_record["clause_processing_status"] = "success"
+        except Exception as exc:
+            output_record["extracted_clauses"] = []
+            output_record["clause_processing_status"] = "failed"
+            output_record["clause_processing_error"] = str(exc)
+            failed_count = failed_count + 1
+
+        processed_records.append(output_record)
+        processed_keys.add(key)
+        processed_count = processed_count + 1
+        write_json(output_path, processed_records)
+
+        debug_log(
+            debug,
+            (
+                f"clause_postprocess_done_record source_file={record['source_file']} "
+                f"source_position={record['source_position']} "
+                f"status={output_record['clause_processing_status']} "
+                f"extracted_count={len(output_record['extracted_clauses'])}"
+            ),
+        )
+
+    debug_log(debug, "clause_postprocess_done")
+
+    return {
+        "total_records": len(source_records),
+        "processed_count": processed_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+    }
 
 
 def run(input_dir="data/lawtalk_qa", output_dir="data/lawtalk_qa_filtered"):
