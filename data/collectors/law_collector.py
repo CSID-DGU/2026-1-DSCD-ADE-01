@@ -5,12 +5,15 @@ from pathlib import Path
 from openpyxl import Workbook
 import os
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent.parent.parent / ".env") # 프로젝트 루트의 .env 로드
+
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 OC = os.getenv("LAW_API_KEY")
 BASE_URL = "https://www.law.go.kr/DRF"
 
 # 항내용 앞 원기호(①②③...) 제거 패턴
 CIRCLE_RE = re.compile(r"^[①-⑳㉑-㉟]+\s*")
+# 호/목 내용 앞 중복 번호("1.  ", "가.  " 등) 제거 패턴
+HO_NUM_RE = re.compile(r"^[\d가-힣]+\.\s*")
 
 # ── 수집 대상 ─────────────────────────────────────────────────────────
 
@@ -202,11 +205,11 @@ def parse_law(xml_text: str):
                 호목_lines = []
                 for 호 in 항.findall("호"):
                     호번호 = 호.findtext("호번호", "").strip().rstrip(".")
-                    호내용 = 호.findtext("호내용", "").strip()
+                    호내용 = HO_NUM_RE.sub("", 호.findtext("호내용", "").strip())  # 중복 번호 제거
                     호목_lines.append(f"{호번호}. {호내용}")
                     for 목 in 호.findall("목"):
                         목번호 = 목.findtext("목번호", "").strip().rstrip(".")
-                        목내용 = 목.findtext("목내용", "").strip()
+                        목내용 = HO_NUM_RE.sub("", 목.findtext("목내용", "").strip())  # 중복 번호 제거
                         호목_lines.append(f"  {목번호}. {목내용}")
 
                 hang_rows.append({
@@ -222,11 +225,11 @@ def parse_law(xml_text: str):
             호목_lines = []
             for 호 in 단위.findall("호"):
                 호번호 = 호.findtext("호번호", "").strip().rstrip(".")
-                호내용 = 호.findtext("호내용", "").strip()
+                호내용 = HO_NUM_RE.sub("", 호.findtext("호내용", "").strip())  # 중복 번호 제거
                 호목_lines.append(f"{호번호}. {호내용}")
                 for 목 in 호.findall("목"):
                     목번호 = 목.findtext("목번호", "").strip().rstrip(".")
-                    목내용 = 목.findtext("목내용", "").strip()
+                    목내용 = HO_NUM_RE.sub("", 목.findtext("목내용", "").strip())  # 중복 번호 제거
                     호목_lines.append(f"  {목번호}. {목내용}")
             if 호목_lines:
                 hang_rows.append({
