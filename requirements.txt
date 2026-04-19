@@ -5,3 +5,6 @@ google-genai>=1.0
 cloud-sql-python-connector[pg8000]>=1.0
 sqlalchemy>=2.0
 google-cloud-storage>=2.0
+requests
+openpyxl
+python-dotenv
