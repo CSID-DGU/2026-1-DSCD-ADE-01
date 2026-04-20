@@ -9,6 +9,8 @@ data/raw/
 data/lawtalk_qa_filtered/
 data/law_chunks/
 evaluation/results/
+keyword_analysis_output/
+output/
 
 # Python
 __pycache__/
