@@ -193,6 +193,19 @@ def test_map_child_row_converts_paragraph_no():
     assert mapped["parent_id"] == 10
     assert mapped["paragraph_no"] == 1
     assert "embedding" not in mapped
+    assert "embed_vertex" not in mapped
+    assert "embed_kure" not in mapped
+
+
+def test_law_child_schema_has_separate_embedding_columns():
+    root = Path(__file__).resolve().parents[1]
+    schema = root / "infra" / "cloud_sql" / "init_law_chunks.sql"
+
+    sql = schema.read_text(encoding="utf-8")
+
+    assert "embedding vector(768)" not in sql
+    assert "embed_vertex vector(3072)" in sql
+    assert "embed_kure vector(1024)" in sql
 
 
 def test_real_law_chunk_csv_files_are_loadable():

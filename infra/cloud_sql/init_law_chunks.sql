@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS law_child (
     article_no TEXT NOT NULL,
     paragraph_no INTEGER,
     child_text TEXT NOT NULL,
-    embedding vector(768)
+    embed_vertex vector(3072),
+    embed_kure vector(1024)
 );
 
 CREATE INDEX IF NOT EXISTS idx_law_parent_law_article

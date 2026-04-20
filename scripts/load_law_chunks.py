@@ -303,7 +303,7 @@ def load_law_chunks(
             article_key = row[1]
             parent_ids[article_key] = parent_id
 
-        # 4. embedding은 CSV에 없으므로 여기서는 넣지 않는다.
+        # 4. 임베딩 컬럼은 CSV에 없으므로 여기서는 넣지 않는다.
         mapped_children = []
         for row in child_rows:
             parent_id = parent_ids[row["article_key"]]
@@ -347,7 +347,7 @@ def main() -> None:
     )
     print(f"law_parent loaded: {stats['parent_count']}")
     print(f"law_child loaded: {stats['child_count']}")
-    print("embedding column remains NULL until the embedding batch runs")
+    print("embed_vertex and embed_kure columns remain NULL until embedding batches run")
 
 
 if __name__ == "__main__":
