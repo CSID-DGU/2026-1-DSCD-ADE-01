@@ -12,12 +12,14 @@ sys.path.insert(0, PROJECT_ROOT)
 def run_lawtalk_qa(args):
     """로톡 QA 전처리를 실행한다."""
     from data.processors.lawtalk_qa_processor import (
+        prepare_db_ready_records,
         process_rule_based_filtered_clauses,
         run,
     )
 
     debug = False
     extract_clauses = False
+    prepare_db = False
     limit = None
     path_args = []
 
@@ -27,6 +29,11 @@ def run_lawtalk_qa(args):
 
         if arg == "--extract-clauses":
             extract_clauses = True
+            index = index + 1
+            continue
+
+        if arg == "--prepare-db":
+            prepare_db = True
             index = index + 1
             continue
 
@@ -80,6 +87,43 @@ def run_lawtalk_qa(args):
 
         print("\n=== 특약 후처리 결과 요약 ===")
         print(f"전체 레코드: {stats['total_records']}건")
+        print(f"이번 실행 처리: {stats['processed_count']}건")
+        print(f"기존 처리 건너뜀: {stats['skipped_count']}건")
+        print(f"실패: {stats['failed_count']}건")
+        return
+
+    if prepare_db:
+        input_file = "data/raw/lawtalk_QA_Context.json"
+        output_file = None
+
+        if len(path_args) >= 1:
+            input_file = path_args[0]
+
+        if len(path_args) >= 2:
+            output_file = path_args[1]
+
+        print(f"[lawtalk_qa] DB 전처리 입력: {input_file}")
+        print(
+            "[lawtalk_qa] DB 전처리 출력: "
+            + (
+                output_file
+                or "data/lawtalk_qa_preprocessed/lawtalk_qa_db_ready.json"
+            )
+        )
+        print(f"[lawtalk_qa] 디버그: {'사용' if debug else '미사용'}")
+        if limit is not None:
+            print(f"[lawtalk_qa] 처리 제한: {limit}건")
+
+        stats = prepare_db_ready_records(
+            input_file,
+            output_file=output_file,
+            debug=debug,
+            limit=limit,
+        )
+
+        print("\n=== DB 전처리 결과 요약 ===")
+        print(f"전체 질문: {stats['total_questions']}건")
+        print(f"전체 답변: {stats['total_answers']}건")
         print(f"이번 실행 처리: {stats['processed_count']}건")
         print(f"기존 처리 건너뜀: {stats['skipped_count']}건")
         print(f"실패: {stats['failed_count']}건")
