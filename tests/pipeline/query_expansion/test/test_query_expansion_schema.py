@@ -6,7 +6,7 @@ import copy
 import pytest
 from pydantic import ValidationError
 
-from retrieval.query_expansion_schema import ClauseQueryExpansion
+from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
 
 
 def _valid_payload() -> dict:
