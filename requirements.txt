@@ -8,3 +8,5 @@ google-cloud-storage>=2.0
 requests
 openpyxl
 python-dotenv
+google-cloud-aiplatform
+sentence-transformers
