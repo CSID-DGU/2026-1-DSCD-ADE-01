@@ -1,10 +1,18 @@
 import json
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+import scripts.run_processor as run_processor
 from data.processors.lawtalk_qa_processor import (
+    ExtractedClausesResult,
+    build_clause_postprocess_prompt,
+    extract_clauses_from_special_clauses_with_llm,
     extract_law_references,
     extract_precedent_numbers,
     extract_special_clauses,
+    load_rule_based_filtered_records,
     process_record,
+    process_rule_based_filtered_clauses,
     run,
 )
 
@@ -19,6 +27,263 @@ def test_extract_special_clauses_only_special_sentences():
     result = extract_special_clauses(text)
 
     assert result == ["계약서 특약사항에 월세 5% 인상 조항이 있습니다."]
+
+
+def test_extracted_clauses_result_schema_accepts_clause_list():
+    result = ExtractedClausesResult(
+        extracted_clauses=["임차인은 원상복구 비용을 부담한다."]
+    )
+
+    assert result.extracted_clauses == ["임차인은 원상복구 비용을 부담한다."]
+    description = ExtractedClausesResult.model_fields["extracted_clauses"].description
+    assert "실제 계약서에 존재할 만한 특약" in description
+
+
+def test_build_clause_postprocess_prompt_uses_special_clauses_only():
+    special_clauses = [
+        "계약서 특약사항에 원상복구는 임차인이 부담한다고 적혀 있습니다.",
+        "이 특약이 민법보다 우선하나요?",
+    ]
+
+    prompt = build_clause_postprocess_prompt(special_clauses)
+
+    assert "special_clauses" in prompt
+    assert "원상복구는 임차인이 부담" in prompt
+    assert "질문 본문" not in prompt
+    assert "실제 계약서에 존재할 만한 특약" in prompt
+    assert "extracted_clauses" in prompt
+
+
+def test_extract_clauses_from_special_clauses_with_llm_uses_gemini_schema():
+    special_clauses = [
+        "계약서 특약사항에 원상복구는 임차인이 부담한다고 적혀 있습니다.",
+        "이 특약이 민법보다 우선하나요?",
+    ]
+    parsed = ExtractedClausesResult(
+        extracted_clauses=["원상복구는 임차인이 부담한다."]
+    )
+    mock_gemini_client = Mock()
+    mock_gemini_client.generate.return_value = parsed
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "shared.llm.gemini_client": SimpleNamespace(
+                gemini_client=mock_gemini_client
+            )
+        },
+    ):
+        result = extract_clauses_from_special_clauses_with_llm(special_clauses)
+
+    assert result == ["원상복구는 임차인이 부담한다."]
+    args, kwargs = mock_gemini_client.generate.call_args
+    assert kwargs["response_schema"] is ExtractedClausesResult
+    assert "special_clauses" in args[0]
+    assert "원상복구는 임차인이 부담" in args[0]
+
+
+def test_load_rule_based_filtered_records_merges_three_files_with_source_metadata(
+    tmp_path,
+):
+    input_dir = tmp_path / "lawtalk_qa_filtered"
+    input_dir.mkdir()
+
+    with open(input_dir / "qa_both.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "index": 1,
+                    "special_clauses": ["특약 A"],
+                    "law_references": ["민법 제103조"],
+                    "precedent_numbers": ["2012다28486"],
+                }
+            ],
+            file,
+            ensure_ascii=False,
+        )
+    with open(input_dir / "qa_law_only.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "index": 1,
+                    "special_clauses": ["특약 B"],
+                    "law_references": ["민법 제623조"],
+                    "precedent_numbers": [],
+                }
+            ],
+            file,
+            ensure_ascii=False,
+        )
+    with open(input_dir / "qa_precedent_only.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "index": 1,
+                    "special_clauses": ["특약 C"],
+                    "law_references": [],
+                    "precedent_numbers": ["2020가단123"],
+                }
+            ],
+            file,
+            ensure_ascii=False,
+        )
+
+    records = load_rule_based_filtered_records(input_dir)
+
+    assert [record["source_file"] for record in records] == [
+        "qa_both.json",
+        "qa_law_only.json",
+        "qa_precedent_only.json",
+    ]
+    assert [record["source_position"] for record in records] == [1, 1, 1]
+    assert records[0]["special_clauses"] == ["특약 A"]
+    assert records[1]["special_clauses"] == ["특약 B"]
+    assert records[2]["special_clauses"] == ["특약 C"]
+
+
+def test_process_rule_based_filtered_clauses_writes_after_each_record(tmp_path):
+    input_dir = tmp_path / "lawtalk_qa_filtered"
+    output_file = input_dir / "qa_clauses_processed.json"
+    input_dir.mkdir()
+
+    with open(input_dir / "qa_both.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "index": 1,
+                    "special_clauses": ["특약 A"],
+                    "law_references": ["민법 제103조"],
+                    "precedent_numbers": [],
+                },
+                {
+                    "index": 2,
+                    "special_clauses": ["특약 B"],
+                    "law_references": ["민법 제623조"],
+                    "precedent_numbers": [],
+                },
+            ],
+            file,
+            ensure_ascii=False,
+        )
+    for name in ["qa_law_only.json", "qa_precedent_only.json"]:
+        with open(input_dir / name, "w", encoding="utf-8") as file:
+            json.dump([], file)
+
+    def fake_extractor(special_clauses):
+        if special_clauses == ["특약 A"]:
+            return ["추출 A"]
+        with open(output_file, "r", encoding="utf-8") as file:
+            saved = json.load(file)
+        assert saved[0]["extracted_clauses"] == ["추출 A"]
+        return ["추출 B"]
+
+    stats = process_rule_based_filtered_clauses(
+        input_dir,
+        output_file=output_file,
+        clause_extractor=fake_extractor,
+    )
+
+    with open(output_file, "r", encoding="utf-8") as file:
+        processed = json.load(file)
+
+    assert stats == {
+        "total_records": 2,
+        "processed_count": 2,
+        "skipped_count": 0,
+        "failed_count": 0,
+    }
+    assert processed[0]["extracted_clauses"] == ["추출 A"]
+    assert processed[1]["extracted_clauses"] == ["추출 B"]
+
+
+def test_process_rule_based_filtered_clauses_skips_existing_output_records(tmp_path):
+    input_dir = tmp_path / "lawtalk_qa_filtered"
+    output_file = input_dir / "qa_clauses_processed.json"
+    input_dir.mkdir()
+
+    with open(input_dir / "qa_both.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {"index": 1, "special_clauses": ["특약 A"]},
+                {"index": 2, "special_clauses": ["특약 B"]},
+            ],
+            file,
+            ensure_ascii=False,
+        )
+    for name in ["qa_law_only.json", "qa_precedent_only.json"]:
+        with open(input_dir / name, "w", encoding="utf-8") as file:
+            json.dump([], file)
+
+    with open(output_file, "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {
+                    "index": 1,
+                    "special_clauses": ["특약 A"],
+                    "source_file": "qa_both.json",
+                    "source_position": 1,
+                    "extracted_clauses": ["추출 A"],
+                    "clause_processing_status": "success",
+                }
+            ],
+            file,
+            ensure_ascii=False,
+        )
+
+    calls = []
+
+    def fake_extractor(special_clauses):
+        calls.append(special_clauses)
+        return ["추출 B"]
+
+    stats = process_rule_based_filtered_clauses(
+        input_dir,
+        output_file=output_file,
+        clause_extractor=fake_extractor,
+    )
+
+    with open(output_file, "r", encoding="utf-8") as file:
+        processed = json.load(file)
+
+    assert calls == [["특약 B"]]
+    assert stats["processed_count"] == 1
+    assert stats["skipped_count"] == 1
+    assert processed[0]["extracted_clauses"] == ["추출 A"]
+    assert processed[1]["extracted_clauses"] == ["추출 B"]
+
+
+def test_process_rule_based_filtered_clauses_respects_limit(tmp_path):
+    input_dir = tmp_path / "lawtalk_qa_filtered"
+    output_file = input_dir / "qa_clauses_processed.json"
+    input_dir.mkdir()
+
+    with open(input_dir / "qa_both.json", "w", encoding="utf-8") as file:
+        json.dump(
+            [
+                {"index": 1, "special_clauses": ["특약 A"]},
+                {"index": 2, "special_clauses": ["특약 B"]},
+            ],
+            file,
+            ensure_ascii=False,
+        )
+    for name in ["qa_law_only.json", "qa_precedent_only.json"]:
+        with open(input_dir / name, "w", encoding="utf-8") as file:
+            json.dump([], file)
+
+    stats = process_rule_based_filtered_clauses(
+        input_dir,
+        output_file=output_file,
+        clause_extractor=lambda special_clauses: special_clauses,
+        limit=1,
+    )
+
+    with open(output_file, "r", encoding="utf-8") as file:
+        processed = json.load(file)
+
+    assert stats["total_records"] == 2
+    assert stats["processed_count"] == 1
+    assert len(processed) == 1
+    assert processed[0]["extracted_clauses"] == ["특약 A"]
 
 
 def test_extract_law_references_with_article():
@@ -153,3 +418,41 @@ def test_run_writes_three_output_files(tmp_path):
     assert both[0]["index"] == 1
     assert law_only[0]["index"] == 2
     assert precedent_only[0]["index"] == 3
+
+
+def test_run_lawtalk_qa_extract_clauses_option(monkeypatch):
+    calls = []
+
+    def fake_process(input_dir, output_file=None, debug=False, limit=None):
+        calls.append((input_dir, output_file, debug, limit))
+        return {
+            "total_records": 3,
+            "processed_count": 2,
+            "skipped_count": 1,
+            "failed_count": 0,
+        }
+
+    monkeypatch.setattr(
+        "data.processors.lawtalk_qa_processor.process_rule_based_filtered_clauses",
+        fake_process,
+    )
+
+    run_processor.run_lawtalk_qa(
+        [
+            "--extract-clauses",
+            "data/lawtalk_qa_filtered",
+            "data/lawtalk_qa_filtered/qa_clauses_processed.json",
+            "--debug",
+            "--limit",
+            "2",
+        ]
+    )
+
+    assert calls == [
+        (
+            "data/lawtalk_qa_filtered",
+            "data/lawtalk_qa_filtered/qa_clauses_processed.json",
+            True,
+            2,
+        )
+    ]
