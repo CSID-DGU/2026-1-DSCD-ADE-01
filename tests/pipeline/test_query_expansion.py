@@ -168,6 +168,18 @@ def test_expand_clause_accepts_json_string_response() -> None:
     assert result.case_query.case_keywords == ["해지 통보", "묵시적 갱신", "계약 종료"]
 
 
+def test_expand_clause_accepts_json_code_fence_response() -> None:
+    payload = _valid_payload()
+    raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
+    fenced = f"```json\n{raw_json}\n```"
+    client = FakeGeminiClient([fenced])
+
+    result = expand_clause(payload["clause_text"], client=client)
+
+    assert isinstance(result, ClauseQueryExpansion)
+    assert result.clause_text == payload["clause_text"]
+
+
 def test_expand_clause_retries_after_invalid_response_and_succeeds() -> None:
     invalid_payload = _invalid_payload()
     valid_payload = _valid_payload()

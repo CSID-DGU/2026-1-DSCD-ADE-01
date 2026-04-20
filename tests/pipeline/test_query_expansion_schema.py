@@ -137,16 +137,59 @@ def test_source_routing_duplicate_source_type_fails() -> None:
     assert "source_routing에 중복 source_type" in str(exc_info.value)
 
 
-def test_law_article_candidate_missing_reason_fails() -> None:
+def test_law_article_candidate_missing_reason_is_allowed() -> None:
     payload = _valid_payload()
     candidate = copy.deepcopy(payload["law_query"]["law_article_candidates"][0])
     candidate.pop("reason")
     payload["law_query"]["law_article_candidates"] = [candidate]
 
-    with pytest.raises(ValidationError) as exc_info:
-        ClauseQueryExpansion.model_validate(payload)
+    model = ClauseQueryExpansion.model_validate(payload)
+    assert model.law_query.law_article_candidates[0].reason is None
 
-    assert "reason" in str(exc_info.value)
+
+def test_article_no_int_values_are_coerced_to_string() -> None:
+    payload = _valid_payload()
+    payload["law_query"]["law_article_candidates"][0]["article_no"] = 6
+    payload["case_query"]["referenced_law_candidates"][0]["article_no"] = 6
+
+    model = ClauseQueryExpansion.model_validate(payload)
+
+    assert model.law_query.law_article_candidates[0].article_no == "6"
+    assert model.case_query.referenced_law_candidates[0].article_no == "6"
+
+
+def test_referenced_law_candidate_accepts_article_title_and_reason() -> None:
+    payload = _valid_payload()
+    payload["case_query"]["referenced_law_candidates"] = [
+        {
+            "law_name": "주택임대차보호법",
+            "article_no": 3,
+            "article_title": "대항력 등",
+            "confidence": "high",
+            "reason": "전입신고 제한 특약과 관련될 수 있다.",
+        }
+    ]
+
+    model = ClauseQueryExpansion.model_validate(payload)
+    candidate = model.case_query.referenced_law_candidates[0]
+
+    assert candidate.article_no == "3"
+    assert candidate.article_title == "대항력 등"
+    assert candidate.reason == "전입신고 제한 특약과 관련될 수 있다."
+
+
+def test_source_routing_defaults_when_missing() -> None:
+    payload = _valid_payload()
+    payload["source_routing"] = []
+
+    model = ClauseQueryExpansion.model_validate(payload)
+
+    assert len(model.source_routing) == 3
+    assert [route.source_type.value for route in model.source_routing] == [
+        "law",
+        "case",
+        "counsel",
+    ]
 
 
 def test_residential_domain_with_commercial_issue_adds_warning_note() -> None:

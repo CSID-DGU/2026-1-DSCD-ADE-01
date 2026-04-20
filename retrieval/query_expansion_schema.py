@@ -1,5 +1,6 @@
+import re
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -102,6 +103,47 @@ def _clean_str_list(values: List[str]) -> List[str]:
     return cleaned
 
 
+def _normalize_article_no(value: Any) -> str | None:
+    """조문번호 입력값을 스키마 친화적인 문자열 형태로 정규화한다."""
+    if value is None:
+        return None
+
+    if isinstance(value, bool):
+        raise ValueError("article_no는 boolean일 수 없습니다.")
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        raise ValueError("article_no는 소수일 수 없습니다.")
+
+    if not isinstance(value, str):
+        raise ValueError("article_no는 문자열, 정수 또는 null이어야 합니다.")
+
+    text = value.strip()
+    if not text:
+        return None
+
+    text = re.sub(r"\s+", "", text)
+
+    match = re.search(r"제?(\d+)조(?:의(\d+))?", text)
+    if match:
+        main = match.group(1)
+        sub = match.group(2)
+        return f"{main}의{sub}" if sub else main
+
+    match = re.fullmatch(r"(\d+)의(\d+)", text)
+    if match:
+        return f"{match.group(1)}의{match.group(2)}"
+
+    if re.fullmatch(r"\d+", text):
+        return text
+
+    return text
+
+
 # =========================
 # Retrieval control terms
 # =========================
@@ -177,12 +219,16 @@ class LawArticleCandidate(BaseModel):
         default=ConfidenceLevel.MEDIUM,
         description="후보 조문이 실제로 관련 있을 가능성",
     )
-    reason: str = Field(
-        ...,
-        min_length=3,
-        max_length=300,
-        description="이 법령/조문 후보를 제시한 이유",
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=150,
+        description="이 법령/조문 후보를 제시한 이유(선택)",
     )
+
+    @field_validator("article_no", mode="before")
+    @classmethod
+    def normalize_article_no(cls, value: Any) -> str | None:
+        return _normalize_article_no(value)
 
 
 class LawQueryExpansion(BaseModel):
@@ -284,10 +330,25 @@ class ReferencedLawCandidate(BaseModel):
         max_length=30,
         description="참조될 가능성이 있는 조문번호",
     )
+    article_title: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="참조될 가능성이 있는 조문 제목",
+    )
     confidence: ConfidenceLevel = Field(
         default=ConfidenceLevel.MEDIUM,
         description="참조조문 후보의 신뢰도",
     )
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=150,
+        description="이 참조조문 후보를 제시한 이유",
+    )
+
+    @field_validator("article_no", mode="before")
+    @classmethod
+    def normalize_article_no(cls, value: Any) -> str | None:
+        return _normalize_article_no(value)
 
 
 class CaseQueryExpansion(BaseModel):
@@ -500,7 +561,7 @@ class ClauseQueryExpansion(BaseModel):
     """
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    schema_version: str = Field(
+    schema_version: Literal["qe_v1"] = Field(
         default="qe_v1",
         description="query expansion schema version",
     )
@@ -568,8 +629,7 @@ class ClauseQueryExpansion(BaseModel):
     )
 
     source_routing: List[SourceRoutingHint] = Field(
-        ...,
-        min_length=1,
+        default_factory=list,
         max_length=3,
         description="법령/판례/상담사례 검색 우선순위 힌트",
     )
@@ -584,6 +644,13 @@ class ClauseQueryExpansion(BaseModel):
     @classmethod
     def validate_top_level_string_lists(cls, values: List[str]) -> List[str]:
         return _clean_str_list(values)
+
+    @field_validator("risk_hypotheses")
+    @classmethod
+    def validate_risk_hypotheses_not_empty(cls, values: List[str]) -> List[str]:
+        if not values:
+            raise ValueError("risk_hypotheses가 비어 있습니다.")
+        return values
 
     @field_validator("issue_type_candidates_freeform")
     @classmethod
@@ -613,6 +680,25 @@ class ClauseQueryExpansion(BaseModel):
 
     @model_validator(mode="after")
     def validate_source_routing_unique(self):
+        if not self.source_routing:
+            self.source_routing = [
+                SourceRoutingHint(
+                    source_type=SourceType.LAW,
+                    priority=Priority.HIGH,
+                    reason="조문 확인이 필요합니다.",
+                ),
+                SourceRoutingHint(
+                    source_type=SourceType.CASE,
+                    priority=Priority.MEDIUM,
+                    reason="쟁점 유사 판례를 확인합니다.",
+                ),
+                SourceRoutingHint(
+                    source_type=SourceType.COUNSEL,
+                    priority=Priority.MEDIUM,
+                    reason="유사 상담 맥락을 확인합니다.",
+                ),
+            ]
+
         source_types = [route.source_type for route in self.source_routing]
         if len(source_types) != len(set(source_types)):
             raise ValueError("source_routing에 중복 source_type이 있습니다.")

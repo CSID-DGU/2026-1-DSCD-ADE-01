@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from pydantic import ValidationError
@@ -62,11 +63,37 @@ def _parse_expansion_result(result: Any) -> ClauseQueryExpansion:
         return ClauseQueryExpansion.model_validate(result)
 
     if isinstance(result, str):
-        return ClauseQueryExpansion.model_validate_json(result)
+        return ClauseQueryExpansion.model_validate_json(_extract_json_object(result))
 
     raise QueryExpansionError(
         f"지원하지 않는 Gemini 응답 타입입니다: {type(result).__name__}"
     )
+
+
+def _strip_json_code_fence(text: str) -> str:
+    """```json ... ``` 형태 응답을 순수 JSON 텍스트로 정리한다."""
+    stripped = text.strip()
+    fence_match = re.fullmatch(
+        r"```(?:json|JSON)?\s*(.*?)\s*```",
+        stripped,
+        flags=re.DOTALL,
+    )
+    if fence_match:
+        return fence_match.group(1).strip()
+    return stripped
+
+
+def _extract_json_object(text: str) -> str:
+    """응답에 설명문이 섞여 있어도 가장 바깥 JSON object를 추출한다."""
+    stripped = _strip_json_code_fence(text)
+    if stripped.startswith("{") and stripped.endswith("}"):
+        return stripped
+
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return stripped
+    return stripped[start : end + 1].strip()
 
 
 def build_repair_prompt(
@@ -95,13 +122,18 @@ def build_repair_prompt(
 - 누락된 필수 필드는 채워라.
 - enum 값은 허용된 문자열 값만 사용하라.
 - issue_types_normalized에는 Enum 이름이 아니라 한글 문자열 값을 사용하라.
-- law_article_candidates에 객체가 있으면 reason을 반드시 포함하라.
+- legal_issue, law_dense_query, case_issue_query, case_fact_pattern_query, counsel_question_query, counsel_answer_query, user_question_intent는 반드시 문자열로 작성하라.
+- applicable_rules, law_keywords, case_keywords, counsel_keywords는 반드시 문자열 배열로 작성하라.
+- query_text 같은 래퍼 객체를 만들지 말고 필드 값 자체를 직접 채워라.
+- law_article_candidates에 객체가 있으면 law_name, article_no, article_title, confidence를 정확히 채우고 reason은 알 수 있을 때만 작성하라.
 - law_name이 불확실하면 law_article_candidates는 빈 배열로 둔다.
 - referenced_law_candidates도 law_name이 불확실하면 빈 배열로 둔다.
 - law_query.target_fields에는 law_child_text 또는 law_parent_text만 사용하라.
 - case_query.target_fields에는 case_issue_summary, case_holding_summary, case_referenced_law, case_full_text만 사용하라.
 - counsel_query.target_fields에는 counsel_question, counsel_tags, counsel_answer만 사용하라.
-- source_routing에 같은 source_type을 중복해서 넣지 말라.
+- source_routing은 불확실하면 빈 배열 []로 둔다.
+- source_routing을 작성할 때는 source_type, priority, reason만 사용하고 confidence는 절대 넣지 말라.
+- article_no_candidates, priority, confidence 같은 스키마 외 필드는 생성하지 말라.
 """.strip()
 
 
