@@ -1,17 +1,26 @@
-"""query_expansion_schema Pydantic 검증 테스트."""
+"""query_expansion2_schema Pydantic 검증 테스트."""
 from __future__ import annotations
 
 import pytest
 from pydantic import ValidationError
 
-from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
+from pipeline.retrieval.query_expansion2.query_expansion_schema import ClauseQueryExpansion
 
 
 def _valid_payload() -> dict:
     return {
         "expansion_query": (
-            "주택임대차 계약에서 임차인의 전입신고 및 확정일자 취득을 제한하는 특약의 효력, "
-            "대항력과 우선변제권 제한 가능성, 임차인에게 불리한 약정의 강행규정 위반 여부를 확인한다."
+            "[쟁점 유형]\n"
+            "전입신고·확정일자·대항력\n\n"
+            "[자유 쟁점]\n"
+            "전입신고 제한, 확정일자 취득 제한, 대항력 상실 가능성, 우선변제권 제한, 임차인에게 불리한 특약\n\n"
+            "[관련 법률 개념 및 규칙]\n"
+            "주택임대차에서 전입신고는 대항력 취득과 관련되고, 확정일자는 우선변제권 확보와 관련된다. "
+            "임차인의 권리 확보 절차를 제한하거나 포기하게 하는 특약은 임차인에게 불리한 약정의 효력 제한 및 "
+            "강행규정 적용 가능성과 연결된다.\n\n"
+            "[유사 분쟁 사실관계]\n"
+            "임대인이 계약서 특약을 근거로 임차인의 전입신고 또는 확정일자 취득을 제한하고, "
+            "이후 보증금 회수, 우선순위, 대항력 인정 여부가 문제되는 상황."
         ),
         "keywords": [
             "전입신고",

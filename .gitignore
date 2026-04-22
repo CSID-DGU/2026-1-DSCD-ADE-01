@@ -29,3 +29,5 @@ web/dist/
 
 # GCP
 google-cloud-sdk/
+
+count_lawtalk_contract_items.py
