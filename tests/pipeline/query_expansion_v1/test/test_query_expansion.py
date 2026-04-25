@@ -1,4 +1,4 @@
-"""query_expansion 메인 패키지 실행 로직 단위 테스트.
+"""query_expansion_v1 실행 로직 단위 테스트.
 
 실제 Vertex AI Gemini를 호출하지 않고 fake client를 주입해 테스트한다.
 """
@@ -11,27 +11,19 @@ from typing import Any
 
 import pytest
 
-from pipeline.retrieval.query_expansion.query_expansion import (
+from pipeline.retrieval.query_expansion_v1.query_expansion import (
     QueryExpansionError,
     expand_clause,
 )
-from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
+from pipeline.retrieval.query_expansion_v1.query_expansion_schema import ClauseQueryExpansion
 from shared.llm.gemini_client import LLMError
 
 
 def _valid_payload() -> dict:
     return {
         "expansion_query": (
-            "[쟁점 유형]\n"
-            "갱신·해지·계약종료\n\n"
-            "[자유 쟁점]\n"
-            "임차인 해지 통보 시점, 계약 만료 전 의사 통지, 묵시적 갱신 성립 여부, 계약 종료 시점 분쟁\n\n"
-            "[관련 법률 개념 및 규칙]\n"
-            "해지 의사의 통지와 도달, 계약갱신요구권·갱신거절, 묵시적 갱신의 요건과 효력이 충돌할 때 "
-            "계약 종료 시점을 어떻게 판단할지에 대한 검색 포인트.\n\n"
-            "[유사 분쟁 사실관계]\n"
-            "임차인이 만료 전 해지 통보를 했으나 임대인이 묵시적 갱신을 주장하거나, "
-            "통지 시점·방법을 두고 계약 존속 여부가 다투어지는 임대차 분쟁."
+            "임대차 계약에서 임차인의 계약 해지 통보 시점과 묵시적 갱신 성립 요건의 충돌 여부, "
+            "계약 종료 효력 판단에 필요한 법적 기준을 확인한다."
         ),
         "keywords": ["해지 통보", "묵시적 갱신", "계약 종료", "임대차"],
     }
@@ -189,7 +181,11 @@ def test_expand_clause_falls_back_when_vertex_schema_too_complex() -> None:
         ]
     )
 
-    result = expand_clause("임차인은 계약 만료 2개월 전 해지 의사를 통보한다.", client=client, max_retries=0)
+    result = expand_clause(
+        "임차인은 계약 만료 2개월 전 해지 의사를 통보한다.",
+        client=client,
+        max_retries=0,
+    )
 
     assert isinstance(result, ClauseQueryExpansion)
     assert len(client.calls) == 2

@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from pipeline.retrieval.query_expansion.query_expansion import expand_clause
-from pipeline.retrieval.query_expansion.retrieval_adapter import build_retrieval_payload
+from pipeline.retrieval.query_expansion_v1.query_expansion import expand_clause
+from pipeline.retrieval.query_expansion_v1.retrieval_adapter import build_retrieval_payload
 
 
 CLAUSES = [
@@ -17,7 +17,7 @@ CLAUSES = [
 
 
 def main() -> None:
-    output_dir = Path("outputs/query_expansion_samples")
+    output_dir = Path("outputs/query_expansion_v1_samples")
     output_dir.mkdir(parents=True, exist_ok=True)
 
     results = []

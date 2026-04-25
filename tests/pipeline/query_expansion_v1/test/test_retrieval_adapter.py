@@ -1,6 +1,6 @@
-from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
-from pipeline.retrieval.query_expansion.retrieval_adapter import build_retrieval_payload
-from tests.pipeline.query_expansion.test.test_query_expansion_schema import _valid_payload
+from pipeline.retrieval.query_expansion_v1.query_expansion_schema import ClauseQueryExpansion
+from pipeline.retrieval.query_expansion_v1.retrieval_adapter import build_retrieval_payload
+from tests.pipeline.query_expansion_v1.test.test_query_expansion_schema import _valid_payload
 
 
 def test_build_retrieval_payload_maps_expansion_to_hybrid_payload() -> None:

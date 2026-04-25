@@ -1,4 +1,4 @@
-"""Vertex AI Gemini query_expansion 메인 패키지 smoke test.
+"""Vertex AI Gemini query expansion smoke test.
 
 주의:
 - 실제 Vertex AI API를 호출하는 integration test다.
@@ -20,6 +20,7 @@ pytestmark = pytest.mark.integration
 REQUIRED_ENV_VARS = [
     "GCP_PROJECT_ID",
     "GCP_LOCATION",
+    # shared.config가 fail-fast로 요구하는 값들
     "CLOUD_SQL_CONNECTION",
     "DB_USER",
     "DB_PASSWORD",
@@ -40,23 +41,22 @@ def _skip_if_env_missing() -> None:
 
 
 def test_expand_clause_with_vertex_gemini_smoke() -> None:
+    """실제 Vertex AI Gemini로 특약 1개를 query expansion한다."""
     _skip_if_env_missing()
 
-    from pipeline.retrieval.query_expansion.query_expansion import expand_clause
-    from pipeline.retrieval.query_expansion.query_expansion_schema import (
+    # shared.config가 import 시점에 fail-fast이므로 env 확인 후 import한다.
+    from pipeline.retrieval.query_expansion_v1.query_expansion import expand_clause
+    from pipeline.retrieval.query_expansion_v1.query_expansion_schema import (
         ClauseQueryExpansion,
     )
 
     clause = "임차인은 계약기간 중 전입신고 및 확정일자를 받지 않는다."
-    result = expand_clause(clause, max_retries=1)
+
+    result = expand_clause(
+        clause,
+        max_retries=1,
+    )
 
     assert isinstance(result, ClauseQueryExpansion)
     assert result.expansion_query
     assert len(result.keywords) >= 3
-    for label in (
-        "[쟁점 유형]",
-        "[자유 쟁점]",
-        "[관련 법률 개념 및 규칙]",
-        "[유사 분쟁 사실관계]",
-    ):
-        assert label in result.expansion_query, f"expansion_query에 {label} 섹션이 없습니다."

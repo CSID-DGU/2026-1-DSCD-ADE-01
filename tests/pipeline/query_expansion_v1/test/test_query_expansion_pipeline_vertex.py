@@ -29,12 +29,13 @@ def _skip_if_env_missing() -> None:
 def test_query_expansion_to_retrieval_payload_with_vertex() -> None:
     _skip_if_env_missing()
 
-    from pipeline.retrieval.query_expansion.query_expansion import expand_clause
-    from pipeline.retrieval.query_expansion.retrieval_adapter import (
+    from pipeline.retrieval.query_expansion_v1.query_expansion import expand_clause
+    from pipeline.retrieval.query_expansion_v1.retrieval_adapter import (
         build_retrieval_payload,
     )
 
     clause = "임차인은 계약기간 중 전입신고 및 확정일자를 받지 않는다."
+
     expansion = expand_clause(clause, max_retries=1)
     payload = build_retrieval_payload(expansion)
 
