@@ -1,18 +1,18 @@
-"""Query expansion 하위 모듈 패키지."""
+"""Query expansion2 하위 모듈 패키지."""
 
-from pipeline.retrieval.query_expansion.query_expansion import (
+from pipeline.retrieval.query_expansion2.query_expansion import (
     QueryExpansionError,
     build_repair_prompt,
     expand_clause,
 )
-from pipeline.retrieval.query_expansion.query_expansion_prompt import (
+from pipeline.retrieval.query_expansion2.query_expansion_prompt import (
     SYSTEM_PROMPT,
     build_user_prompt,
 )
-from pipeline.retrieval.query_expansion.query_expansion_schema import (
+from pipeline.retrieval.query_expansion2.query_expansion_schema import (
     ClauseQueryExpansion,
 )
-from pipeline.retrieval.query_expansion.retrieval_adapter import (
+from pipeline.retrieval.query_expansion2.retrieval_adapter import (
     build_retrieval_payload,
 )
 

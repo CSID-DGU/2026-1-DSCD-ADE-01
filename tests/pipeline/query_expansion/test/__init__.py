@@ -1,1 +1,1 @@
-"""Query expansion pytest 패키지."""
+"""Query expansion2 pytest 패키지."""
