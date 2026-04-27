@@ -33,3 +33,7 @@ web/dist/
 
 # GCP
 google-cloud-sdk/
+
+/outputs/qa_item_analysis
+pipeline/retrieval/query_expansion_v1/
+tests/pipeline/query_expansion_v1/
