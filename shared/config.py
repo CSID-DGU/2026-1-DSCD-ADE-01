@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     # ---- Models (선택값, 기본값 존재) ----
     gemini_model: str = "gemini-2.5-flash"
 
+    # ---- Document AI (Document OCR processor) ----
+    docai_location: str
+    docai_processor_id: str
+
 
 def _format_validation_errors(exc: ValidationError) -> str:
     """Pydantic ValidationError를 사람이 읽기 쉬운 메시지로 변환.
@@ -129,6 +133,8 @@ DB_PASSWORD: str = settings.db_password
 DB_NAME: str = settings.db_name
 GCS_BUCKET: str = settings.gcs_bucket
 GEMINI_MODEL: str = settings.gemini_model
+DOCAI_LOCATION: str = settings.docai_location
+DOCAI_PROCESSOR_ID: str = settings.docai_processor_id
 
 
 __all__ = [
@@ -144,4 +150,6 @@ __all__ = [
     "DB_NAME",
     "GCS_BUCKET",
     "GEMINI_MODEL",
+    "DOCAI_LOCATION",
+    "DOCAI_PROCESSOR_ID",
 ]

@@ -9,4 +9,5 @@ requests
 openpyxl
 python-dotenv
 google-cloud-aiplatform
+google-cloud-documentai>=2.0
 sentence-transformers
