@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import os
 import ast
 import time
+import json
 
 import pandas as pd
 import numpy as np
@@ -32,14 +33,19 @@ LOCATION = os.getenv("GCP_LOCATION")
 # ============================================
 # 경로 설정
 # ============================================
-SPECIAL_TERMS_PATH = "../../data/특약_전체.csv"
+from pathlib import Path
+BASE_DIR = Path(__file__).resolve().parent
+
+# 데이터 입력 경로
+SPECIAL_TERMS_PATH = "C:/Users/yseoh/OneDrive - 동국대학교/동국대학교/4학년 2학기/데캡/ADE_project/특약_전체.csv"
 SPECIAL_TERMS_COL = "특약"
 
-LAW_PATH = "../../data/law_chunks/law_child.csv"
-PREC_PATH = "../../data/prec_chunks/case_law_with_embeddings.csv"
+LAW_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "law_child.csv"
+PREC_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "case_law_with_embeddings.csv"
 
-OUTPUT_LAW_PATH = "../../data/retrieval/dense_law.csv"
-OUTPUT_PREC_PATH = "../../data/retrieval/dense_prec.csv"
+# 출력 디렉토리
+OUTPUT_DIR = BASE_DIR.parent.parent / "data" / "retrieval"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TOP_K = 30
 MIN_SIMILARITY = {
@@ -190,8 +196,8 @@ def search_similar(
     result = result[result["similarity"] >= min_sim]
 
     return result.sort_values("similarity", ascending=False).head(top_k).reset_index(drop=True)
-
-
+ 
+    
 # ============================================
 # 메인
 # ============================================
@@ -203,7 +209,7 @@ def main():
     print("=" * 60)
 
     special_terms = load_special_terms(SPECIAL_TERMS_PATH, SPECIAL_TERMS_COL)
-    special_terms = special_terms[:5]  # 테스트용 5개
+    special_terms = special_terms[133:134]  # 테스트용 1개
 
     # 모델별로 필요한 컬럼만 로드
     law_chunks = {col: load_chunks(LAW_PATH, col, LAW_KEEP_COLS) for col in MODEL_COLS}
@@ -258,23 +264,42 @@ def main():
                     "judgment_summary": row["judgment_summary"],
                 })
 
-    # CSV 저장
-    print(f"\n{'=' * 60}")
-    print("결과 CSV 저장 중...")
-    print("=" * 60)
-
+    # 특약 인덱스별로 JSON 저장
     law_df = pd.DataFrame(law_rows)
-    law_df.to_csv(OUTPUT_LAW_PATH, index=False, encoding="utf-8-sig")
-    print(f"  법령 결과: {OUTPUT_LAW_PATH} ({len(law_df)}행)")
+    law_df["similarity"] = law_df["similarity"].astype(float)
 
     prec_df = pd.DataFrame(prec_rows)
-    prec_df.to_csv(OUTPUT_PREC_PATH, index=False, encoding="utf-8-sig")
-    print(f"  판례 결과: {OUTPUT_PREC_PATH} ({len(prec_df)}행)")
+    prec_df["similarity"] = prec_df["similarity"].astype(float)
 
+    for si, term_text in enumerate(special_terms):
+        # 법령 저장
+        law_subset = law_df[law_df["special_terms"] == term_text]
+        law_output = {
+            "index": si,
+            "special_terms": term_text,
+            "results": law_subset.to_dict(orient="records")
+        }
+        law_path = OUTPUT_DIR / "dense_law.json"
+        with open(law_path, "w", encoding="utf-8") as f:
+            json.dump(law_output, f, ensure_ascii=False, indent=2)
+
+        # 판례 저장
+        prec_subset = prec_df[prec_df["special_terms"] == term_text]
+        prec_output = {
+            "index": si,
+            "special_terms": term_text,
+            "results": prec_subset.to_dict(orient="records")
+        }
+        prec_path = OUTPUT_DIR / "dense_prec.json"
+        with open(prec_path, "w", encoding="utf-8") as f:
+            json.dump(prec_output, f, ensure_ascii=False, indent=2)
+
+    print(f"  법령 결과: {OUTPUT_DIR / 'dense_law.json'}")
+    print(f"  판례 결과: {OUTPUT_DIR / 'dense_prec.json'}")
+    
     print(f"\n{'=' * 60}")
     print(f"전체 소요 시간: {time.time()-total_start:.1f}초")
     print(f"{'=' * 60}")
-
 
 if __name__ == "__main__":
     main()
