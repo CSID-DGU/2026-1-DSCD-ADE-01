@@ -1,0 +1,18 @@
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --header-navy: #1e293b;
+  --primary-navy: #002045;
+  --panel-bg: #faf9fd;
+  --page-bg: #f4f3f7;
+  --border-default: #e2e8f0;
+}
+
+body {
+  background-color: var(--page-bg);
+  color: #1a1c1e;
+}
