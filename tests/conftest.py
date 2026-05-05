@@ -31,6 +31,7 @@ _REQUIRED_ENV_DEFAULTS: dict[str, str] = {
     "GCS_BUCKET": "test-bucket",
     "DOCAI_LOCATION": "us",
     "DOCAI_PROCESSOR_ID": "test-processor",
+    "DOCAI_LAYOUT_PROCESSOR_ID": "test-layout-processor",
 }
 
 for _key, _value in _REQUIRED_ENV_DEFAULTS.items():

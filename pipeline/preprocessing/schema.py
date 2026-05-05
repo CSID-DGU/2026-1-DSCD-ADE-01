@@ -20,6 +20,11 @@ class Building(BaseModel):
     area_m2: float | None = None
 
 
+class Land(BaseModel):
+    land_type: Literal["대", "잡종지", "전", "답", "기타"] | None = None
+    land_area_m2: float | None = None
+
+
 class LeasedPart(BaseModel):
     detail_address: str | None = None
     area_m2: float | None = None
@@ -43,19 +48,7 @@ class ContractKind(BaseModel):
 
 class PropertyInfo(BaseModel):
     address: str | None = None
-    building_type: Literal[
-        "아파트",
-        "오피스텔",
-        "빌라",
-        "단독주택",
-        "상업용건물",
-        "토지",
-        "다세대주택",
-        "다가구주택",
-        "기타",
-    ] | None = None
-    land_type: Literal["대", "잡종지", "전", "답", "기타"] | None = None
-    land_area_m2: float | None = None
+    land: Land | None = None
     building: Building | None = None
     leased_part: LeasedPart | None = None
     contract_kind: ContractKind | None = None
