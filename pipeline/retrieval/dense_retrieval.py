@@ -37,11 +37,11 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # 데이터 입력 경로
-SPECIAL_TERMS_PATH = "C:/Users/yseoh/OneDrive - 동국대학교/동국대학교/4학년 2학기/데캡/ADE_project/특약_전체.csv"
+SPECIAL_TERMS_PATH = "특약_전체.csv" # 1. 추후 쿼리 익스펜션으로 수정 필요
 SPECIAL_TERMS_COL = "특약"
 
 LAW_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "law_child.csv"
-PREC_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "case_law_with_embeddings.csv"
+PREC_PATH = BASE_DIR.parent.parent / "output" / "case_law_with_embeddings.csv" # 2. 임베딩된 법령, 판례 데이터 저장 경로 통일 필요
 
 # 출력 디렉토리
 OUTPUT_DIR = BASE_DIR.parent.parent / "data" / "retrieval"
