@@ -199,13 +199,61 @@ def test_map_child_row_converts_paragraph_no():
 
 def test_law_child_schema_has_separate_embedding_columns():
     root = Path(__file__).resolve().parents[1]
-    schema = root / "infra" / "cloud_sql" / "init_law_chunks.sql"
+    schema = root / "infra" / "cloud_sql" / "init_schema.sql"
 
     sql = schema.read_text(encoding="utf-8")
 
-    assert "embedding vector(768)" not in sql
+    assert "child_text TEXT NOT NULL,\n    embedding vector(768)" not in sql
     assert "embed_vertex vector(3072)" in sql
     assert "embed_kure vector(1024)" in sql
+
+
+def test_cloud_sql_schema_includes_case_law_and_qa_tables():
+    root = Path(__file__).resolve().parents[1]
+    schema = root / "infra" / "cloud_sql" / "init_schema.sql"
+
+    sql = schema.read_text(encoding="utf-8")
+
+    for table_name in [
+        "law_parent",
+        "law_child",
+        "case_law",
+        "referenced_law",
+        "referenced_case",
+        "questions",
+        "answers",
+    ]:
+        assert f"CREATE TABLE IF NOT EXISTS {table_name}" in sql
+
+    assert "case_id TEXT NOT NULL UNIQUE" in sql
+    assert "question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE" in sql
+    assert "embedding vector(768)" in sql
+    assert "answer_body JSONB" in sql
+
+
+def test_cloud_sql_schema_includes_reference_indexes_and_constraints():
+    root = Path(__file__).resolve().parents[1]
+    schema = root / "infra" / "cloud_sql" / "init_schema.sql"
+
+    sql = schema.read_text(encoding="utf-8")
+
+    for expected in [
+        "CONSTRAINT uq_referenced_law_case_clause UNIQUE (case_id, clause_key)",
+        "CONSTRAINT uq_referenced_case_case_number UNIQUE (case_id, referenced_case_number)",
+        "REFERENCES case_law(case_id) ON DELETE CASCADE",
+        "REFERENCES law_parent(id)",
+        "REFERENCES law_child(id)",
+        "idx_case_law_case_number",
+        "idx_case_law_judgment_date",
+        "idx_case_law_court_name",
+        "idx_referenced_law_case_id",
+        "idx_referenced_law_clause_key",
+        "idx_referenced_law_parent_id",
+        "idx_referenced_law_child_id",
+        "idx_referenced_case_case_id",
+        "idx_referenced_case_number",
+    ]:
+        assert expected in sql
 
 
 def test_real_law_chunk_csv_files_are_loadable():
