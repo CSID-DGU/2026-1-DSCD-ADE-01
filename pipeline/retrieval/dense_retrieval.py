@@ -1,7 +1,7 @@
 """
 특약 문장 vs 법령/판례 청크 시멘틱 검색 MVP
-- 입력: 특약 CSV (특약 컬럼)
-- 출력: 특약별 유사 법령/판례 Top-K → CSV 저장
+- 입력: query_expansion.json (특약 + dense_query + bm25_keywords)
+- 출력: dense_law.json, dense_caselaw.json (전체 특약 결과 통합)
 """
 
 from dotenv import load_dotenv
@@ -36,18 +36,19 @@ LOCATION = os.getenv("GCP_LOCATION")
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
-# 데이터 입력 경로
-SPECIAL_TERMS_PATH = "C:/Users/yseoh/OneDrive - 동국대학교/동국대학교/4학년 2학기/데캡/ADE_project/특약_전체.csv"
-SPECIAL_TERMS_COL = "특약"
+# 입력
+QUERY_EXPANSION_PATH = BASE_DIR / "query_expansion.json"
 
 LAW_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "law_child.csv"
-PREC_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "case_law_with_embeddings.csv"
+PREC_PATH = BASE_DIR.parent.parent / "output" / "case_law_with_embeddings.csv"
 
-# 출력 디렉토리
-OUTPUT_DIR = BASE_DIR.parent.parent / "data" / "retrieval"
+# 출력
+OUTPUT_DIR = BASE_DIR.parent.parent / "output" / "retrieval"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-TOP_K = 30
+TOP_K = 20
+KEYWORD_BOOST = 0.05
+
 MIN_SIMILARITY = {
     "embed_vertex": 0.4,
     "embed_kure": 0.3,
@@ -58,9 +59,9 @@ MODEL_COLS = {
     "embed_kure": "nlpai-lab/KURE-v1",
 }
 
-# 법령 출력 컬럼: 식별자, 원본 텍스트
+# 법령 출력 컬럼
 LAW_KEEP_COLS = ["clause_key", "child_text"]
-# 판례 출력 컬럼: 식별자, 판결 요지
+# 판례 출력 컬럼
 PREC_KEEP_COLS = ["case_id", "judgment_summary"]
 
 # ============================================
@@ -92,7 +93,7 @@ def get_kure_model() -> SentenceTransformer:
     retry=retry_if_exception_type(Exception),
     wait=wait_exponential(multiplier=1, min=2, max=60),
     stop=stop_after_attempt(5),
-    before_sleep=lambda r: print(f"  API 오류, {r.next_action.sleep}초 후 재시도 ({r.attempt_number}/5)...")
+    before_sleep=lambda r: print(f"  ⚠ API 오류, {r.next_action.sleep}초 후 재시도 ({r.attempt_number}/5)...")
 )
 def embed_query(text: str, embed_col: str) -> np.ndarray:
     model_name = MODEL_COLS[embed_col]
@@ -122,31 +123,18 @@ def parse_embedding(value):
 
 
 def load_chunks(path: str, embed_col: str, keep_cols: list[str]) -> pd.DataFrame:
-    """
-    청크 CSV 로드 후 필요한 컬럼만 유지.
-    임베딩 벡터는 유사도 계산 후 출력에서 제외.
-    """
     t0 = time.time()
     print(f"  로딩: {os.path.basename(path)} [{embed_col}] ...", end=" ", flush=True)
 
     df = pd.read_csv(path)
 
-    # 필수 컬럼 존재 여부 확인
     required = [embed_col] + keep_cols
     missing = [c for c in required if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"컬럼 누락: {missing}\n"
-            f"사용 가능한 컬럼: {list(df.columns)}"
-        )
+        raise ValueError(f"컬럼 누락: {missing}\n사용 가능한 컬럼: {list(df.columns)}")
 
-    # 임베딩이 있는 행만 유지
     df = df[df[embed_col].notna()].copy()
-
-    # 임베딩 파싱 (계산용, 출력 제외)
     df["_vec"] = df[embed_col].apply(parse_embedding)
-
-    # 출력에 필요한 컬럼만 유지 (임베딩 원본 컬럼 제외)
     df = df[keep_cols + ["_vec"]]
 
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
@@ -154,26 +142,25 @@ def load_chunks(path: str, embed_col: str, keep_cols: list[str]) -> pd.DataFrame
 
 
 # ============================================
-# 특약 CSV 로드
+# 쿼리 확장 JSON 로드
 # ============================================
-def load_special_terms(path: str, col: str) -> list[str]:
-    print(f"  로딩: {os.path.basename(path)} [{col}] ...", end=" ", flush=True)
-    df = pd.read_csv(path)
-    if col not in df.columns:
-        raise ValueError(f"'{col}' 컬럼이 없습니다. 사용 가능: {list(df.columns)}")
-    terms = df[col].dropna().astype(str).str.strip().tolist()
-    terms = [t for t in terms if t]
-    print(f"완료 ({len(terms)}개)")
-    return terms
+def load_query_expansion(path: str) -> list[dict]:
+    print(f"  로딩: {os.path.basename(path)} ...", end=" ", flush=True)
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    print(f"완료 ({len(data)}개 특약)")
+    return data
 
 
 # ============================================
-# 유사도 검색 (부스트 없음, 유사도 기준 정렬)
+# 유사도 검색 + 키워드 부스트
 # ============================================
 def search_similar(
     query_vec: np.ndarray,
     df: pd.DataFrame,
     embed_col: str,
+    keywords: list[str],
+    text_col: str,
     top_k: int = TOP_K,
 ) -> pd.DataFrame:
     chunk_matrix = np.vstack(df["_vec"].values)
@@ -187,17 +174,29 @@ def search_similar(
 
     sims = cosine_similarity(query_matrix, chunk_matrix)[0]
 
-    # _vec 제외한 출력 컬럼만 유지
     result = df.drop(columns=["_vec"]).copy()
     result["similarity"] = sims
 
-    # 유사도 하한선 필터
+    # 키워드 부스트
+    if keywords and text_col in result.columns:
+        hits = result[text_col].apply(
+            lambda t: sum(1 for kw in keywords if kw in str(t))
+        )
+        result["keyword_hits"] = hits
+        result["boost"] = hits * KEYWORD_BOOST
+        result["score"] = result["similarity"] + result["boost"]
+    else:
+        result["keyword_hits"] = 0
+        result["boost"] = 0.0
+        result["score"] = result["similarity"]
+
+    # 유사도 하한선
     min_sim = MIN_SIMILARITY.get(embed_col, 0.3)
     result = result[result["similarity"] >= min_sim]
 
-    return result.sort_values("similarity", ascending=False).head(top_k).reset_index(drop=True)
- 
-    
+    return result.sort_values("score", ascending=False).head(top_k).reset_index(drop=True)
+
+
 # ============================================
 # 메인
 # ============================================
@@ -205,101 +204,115 @@ def main():
     total_start = time.time()
 
     print("=" * 60)
-    print("특약 / 법령 / 판례 로드 중...")
+    print("쿼리 확장 / 법령 / 판례 로드 중...")
     print("=" * 60)
 
-    special_terms = load_special_terms(SPECIAL_TERMS_PATH, SPECIAL_TERMS_COL)
-    special_terms = special_terms[133:134]  # 테스트용 1개
+    terms = load_query_expansion(QUERY_EXPANSION_PATH)
 
-    # 모델별로 필요한 컬럼만 로드
     law_chunks = {col: load_chunks(LAW_PATH, col, LAW_KEEP_COLS) for col in MODEL_COLS}
     prec_chunks = {col: load_chunks(PREC_PATH, col, PREC_KEEP_COLS) for col in MODEL_COLS}
     print()
 
-    law_rows = []
-    prec_rows = []
+    # 전체 결과 누적
+    all_law_results = []
+    all_prec_results = []
 
-    total = len(special_terms)
-    for si, term_text in enumerate(special_terms):
-        print(f"\n--- 특약 {si+1}/{total} ---")
-        print(f"원문: {term_text[:100]}{'...' if len(term_text) > 100 else ''}")
+    total = len(terms)
+    for item in terms:
+        idx = item["index"]
+        clause = item["clause"]
+        dense_query = item["retrieval_payload"]["dense_query"]
+        bm25_keywords = item["retrieval_payload"].get("bm25_keywords", [])
+
+        print(f"\n--- 특약 [{idx}] ({terms.index(item)+1}/{total}) ---")
+        print(f"원문: {clause[:100]}{'...' if len(clause) > 100 else ''}")
+        if bm25_keywords:
+            print(f"키워드: {bm25_keywords[:8]}{'...' if len(bm25_keywords) > 8 else ''}")
+
+        term_law_results = []
+        term_prec_results = []
 
         for embed_col in MODEL_COLS:
-            # 쿼리 임베딩
+            # 임베딩 (dense_query 사용)
             t0 = time.time()
-            print(f"  {embed_col} 임베딩 중...", end=" ", flush=True)
-            query_vec = embed_query(term_text, embed_col)
+            print(f"  ▶ {embed_col} 임베딩 중...", end=" ", flush=True)
+            query_vec = embed_query(dense_query, embed_col)
             print(f"완료 ({time.time()-t0:.2f}초)")
             time.sleep(0.5)
 
             # 법령 검색
             t0 = time.time()
-            print(f"  {embed_col} 법령 검색 중...", end=" ", flush=True)
-            law_results = search_similar(query_vec, law_chunks[embed_col], embed_col)
-            print(f"완료 ({time.time()-t0:.2f}초) -> {len(law_results)}건")
+            print(f"  ▶ {embed_col} 법령 검색 중...", end=" ", flush=True)
+            law_results = search_similar(
+                query_vec, law_chunks[embed_col], embed_col,
+                bm25_keywords, text_col="child_text"
+            )
+            print(f"완료 ({time.time()-t0:.2f}초) → {len(law_results)}건")
 
             for rank, row in law_results.iterrows():
-                law_rows.append({
-                    "special_terms": term_text,
+                term_law_results.append({
                     "model": embed_col,
                     "rank": rank + 1,
-                    "similarity": row["similarity"],
+                    "similarity": float(row["similarity"]),
+                    "keyword_hits": int(row["keyword_hits"]),
+                    "boost": float(row["boost"]),
+                    "score": float(row["score"]),
                     "clause_key": row["clause_key"],
                     "child_text": row["child_text"],
                 })
 
             # 판례 검색
             t0 = time.time()
-            print(f"  {embed_col} 판례 검색 중...", end=" ", flush=True)
-            prec_results = search_similar(query_vec, prec_chunks[embed_col], embed_col)
-            print(f"완료 ({time.time()-t0:.2f}초) -> {len(prec_results)}건")
+            print(f"  ▶ {embed_col} 판례 검색 중...", end=" ", flush=True)
+            prec_results = search_similar(
+                query_vec, prec_chunks[embed_col], embed_col,
+                bm25_keywords, text_col="judgment_summary"
+            )
+            print(f"완료 ({time.time()-t0:.2f}초) → {len(prec_results)}건")
 
             for rank, row in prec_results.iterrows():
-                prec_rows.append({
-                    "special_terms": term_text,
+                term_prec_results.append({
                     "model": embed_col,
                     "rank": rank + 1,
-                    "similarity": row["similarity"],
+                    "similarity": float(row["similarity"]),
+                    "keyword_hits": int(row["keyword_hits"]),
+                    "boost": float(row["boost"]),
+                    "score": float(row["score"]),
                     "case_id": row["case_id"],
                     "judgment_summary": row["judgment_summary"],
                 })
 
-    # 특약 인덱스별로 JSON 저장
-    law_df = pd.DataFrame(law_rows)
-    law_df["similarity"] = law_df["similarity"].astype(float)
+        all_law_results.append({
+            "index": idx,
+            "clause": clause,
+            "results": term_law_results,
+        })
 
-    prec_df = pd.DataFrame(prec_rows)
-    prec_df["similarity"] = prec_df["similarity"].astype(float)
+        all_prec_results.append({
+            "index": idx,
+            "clause": clause,
+            "results": term_prec_results,
+        })
 
-    for si, term_text in enumerate(special_terms):
-        # 법령 저장
-        law_subset = law_df[law_df["special_terms"] == term_text]
-        law_output = {
-            "index": si,
-            "special_terms": term_text,
-            "results": law_subset.to_dict(orient="records")
-        }
-        law_path = OUTPUT_DIR / "dense_law.json"
-        with open(law_path, "w", encoding="utf-8") as f:
-            json.dump(law_output, f, ensure_ascii=False, indent=2)
+    # JSON 저장
+    print(f"\n{'=' * 60}")
+    print("결과 JSON 저장 중...")
+    print("=" * 60)
 
-        # 판례 저장
-        prec_subset = prec_df[prec_df["special_terms"] == term_text]
-        prec_output = {
-            "index": si,
-            "special_terms": term_text,
-            "results": prec_subset.to_dict(orient="records")
-        }
-        prec_path = OUTPUT_DIR / "dense_prec.json"
-        with open(prec_path, "w", encoding="utf-8") as f:
-            json.dump(prec_output, f, ensure_ascii=False, indent=2)
+    law_path = OUTPUT_DIR / "dense_law.json"
+    with open(law_path, "w", encoding="utf-8") as f:
+        json.dump(all_law_results, f, ensure_ascii=False, indent=2)
+    print(f"법령: {law_path} ({sum(len(r['results']) for r in all_law_results)}건)")
 
-    print(f"  법령 결과: {OUTPUT_DIR / 'dense_law.json'}")
-    print(f"  판례 결과: {OUTPUT_DIR / 'dense_prec.json'}")
-    
+    prec_path = OUTPUT_DIR / "dense_caselaw.json"
+    with open(prec_path, "w", encoding="utf-8") as f:
+        json.dump(all_prec_results, f, ensure_ascii=False, indent=2)
+    print(f"판례: {prec_path} ({sum(len(r['results']) for r in all_prec_results)}건)")
+
     print(f"\n{'=' * 60}")
     print(f"전체 소요 시간: {time.time()-total_start:.1f}초")
     print(f"{'=' * 60}")
+
 
 if __name__ == "__main__":
     main()

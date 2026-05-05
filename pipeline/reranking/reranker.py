@@ -29,12 +29,12 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # 법령 BM25 / Dense
-BM25_LAW_JSON   = Path("law_match_results.json")
-DENSE_LAW_JSON = BASE_DIR.parent.parent / "data" / "retrieval" / "dense_law.json"
+BM25_LAW_JSON   = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_law.json"
+DENSE_LAW_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_law.json"
 
 # 판례 BM25 / Dense
-BM25_PREC_JSON  = Path("case_match_results.json")
-DENSE_LAW_JSON = BASE_DIR.parent.parent / "data" / "retrieval" / "dense_prec.json"
+DENSE_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_lawcase.json"
+DENSE_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_lawcase.json"
 
 # 식별자 필드명
 LAW_ID_FIELD  = "clause_key"
@@ -48,10 +48,10 @@ TOP_N  = 5   # 최종 반환 수
 DENSE_TOP_K = 20
 
 # 출력 파일
-OUTPUT_DIR = BASE_DIR.parent.parent / "data" / "reranking"
+OUTPUT_DIR = BASE_DIR.parent.parent / "output" / "reranking"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_LAW_PATH  = Path("rrf_law_results.json")
-OUT_PREC_PATH = Path("rrf_prec_results.json")
+OUT_LAW_PATH  = OUTPUT_DIR / "reranking_law.json"
+OUT_PREC_PATH = OUTPUT_DIR / "reranking_lawcase.json"
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -71,7 +71,7 @@ def load_bm25(path: Path, id_field: str) -> dict:
             doc_id = str(m[id_field])
             rank_map[doc_id] = m["rank"]
         bm25_map[idx] = {
-            "special_terms" : item["clause"],
+            "special_terms" : item.get("special_terms") or item.get("clause", ""),
             "rank_map"      : rank_map,
         }
     return bm25_map
@@ -81,6 +81,7 @@ def load_dense(dense_path: Path, id_field: str, top_k: int) -> dict:
     """
     Dense JSON → {clause_text: [{doc_id, score, rank, doc_text, summary}]} 반환
 
+    - 리스트 형태로 특약 여러 개 포함
     - 두 모델 결과를 similarity 기준으로 재정렬 후 단일 rank 부여
     - 같은 doc_id가 두 모델에서 중복 시 최고 score만 유지
     - top_k개까지만 사용
@@ -88,32 +89,42 @@ def load_dense(dense_path: Path, id_field: str, top_k: int) -> dict:
     with open(dense_path, encoding="utf-8") as f:
         data = json.load(f)
 
-    clause_text = data["special_terms"]
-    records = []
+    # 단일 객체인 경우 리스트로 감싸서 통일
+    if isinstance(data, dict):
+        data = [data]
 
-    for r in data["results"]:
-        doc_id = str(r.get(id_field, ""))
-        records.append({
-            "doc_id"   : doc_id,
-            "score"    : float(r["similarity"]),
-            "doc_text" : str(r.get("child_text", "")),
-            "summary"  : str(r.get("judgment_summary", "")),
-            "model"    : r.get("model", ""),
-        })
+    dense_map: dict[str, list] = {}
 
-    # doc_id별 최고 score만 유지
-    best: dict[str, dict] = {}
-    for rec in records:
-        did = rec["doc_id"]
-        if did not in best or rec["score"] > best[did]["score"]:
-            best[did] = rec
+    for item in data:
+        # 키명 통일: clause → special_terms
+        clause_text = item.get("special_terms") or item.get("clause", "")
+        records = []
 
-    deduped = sorted(best.values(), key=lambda x: x["score"], reverse=True)
-    deduped = deduped[:top_k]
-    for rank, rec in enumerate(deduped, 1):
-        rec["rank"] = rank
+        for r in item["results"]:
+            doc_id = str(r.get(id_field, ""))
+            records.append({
+                "doc_id"   : doc_id,
+                "score"    : float(r["similarity"]),
+                "doc_text" : str(r.get("child_text", "")),
+                "summary"  : str(r.get("judgment_summary", "")),
+                "model"    : r.get("model", ""),
+            })
 
-    return {clause_text: deduped}
+        # doc_id별 최고 score만 유지
+        best: dict[str, dict] = {}
+        for rec in records:
+            did = rec["doc_id"]
+            if did not in best or rec["score"] > best[did]["score"]:
+                best[did] = rec
+
+        deduped = sorted(best.values(), key=lambda x: x["score"], reverse=True)
+        deduped = deduped[:top_k]
+        for rank, rec in enumerate(deduped, 1):
+            rec["rank"] = rank
+
+        dense_map[clause_text] = deduped
+
+    return dense_map
 
 
 def rrf_score(bm25_rank: int, dense_rank: int, k: int) -> float:
