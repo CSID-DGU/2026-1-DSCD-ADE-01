@@ -6,6 +6,7 @@ __all__ = [
     "PreprocessingError",
     "contract_to_json",
     "parse_lease_contract",
+    "parse_lease_contract_bytes",
     "parse_lease_contract_from_text",
 ]
 
@@ -15,6 +16,7 @@ def __getattr__(name: str):
         "PreprocessingError",
         "contract_to_json",
         "parse_lease_contract",
+        "parse_lease_contract_bytes",
         "parse_lease_contract_from_text",
     }:
         from pipeline.preprocessing import pipeline

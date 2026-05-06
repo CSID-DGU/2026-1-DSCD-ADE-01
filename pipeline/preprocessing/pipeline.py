@@ -64,6 +64,14 @@ def _save_to_gcs(contract: LeaseContract, prefix: str, stem: str) -> str:
     return blob_name
 
 
+def _parse_contract_bytes(pdf_bytes: bytes) -> LeaseContract:
+    try:
+        layout_text = layout.extract_layout_text(pdf_bytes)
+        return parse_contract_text(mask_pii(layout_text))
+    except (layout.LayoutError, RuleParseError) as error:
+        raise PreprocessingError(str(error)) from error
+
+
 # ---------------------------------------------------------------------------
 # 공개 API
 # ---------------------------------------------------------------------------
@@ -98,16 +106,25 @@ def parse_lease_contract(
     del client
     pdf_bytes, stem = _load_pdf(pdf_uri)
 
-    try:
-        layout_text = layout.extract_layout_text(pdf_bytes)
-        contract = parse_contract_text(mask_pii(layout_text))
-    except (layout.LayoutError, RuleParseError) as error:
-        raise PreprocessingError(str(error)) from error
+    contract = _parse_contract_bytes(pdf_bytes)
 
     if output_gcs_prefix is not None:
         _save_to_gcs(contract, output_gcs_prefix, stem)
 
     return contract
+
+
+def parse_lease_contract_bytes(
+    pdf_bytes: bytes,
+    *,
+    client: object | None = None,
+) -> LeaseContract:
+    """PDF bytes를 ``LeaseContract``로 파싱한다.
+
+    FastAPI 파일 업로드처럼 이미 메모리에 올라온 PDF를 처리할 때 사용한다.
+    """
+    del client
+    return _parse_contract_bytes(pdf_bytes)
 
 
 def parse_lease_contract_from_text(
