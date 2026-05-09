@@ -29,6 +29,10 @@ _ENV_KEYS = (
     "DB_NAME",
     "GCS_BUCKET",
     "GEMINI_MODEL",
+    "DOCAI_LOCATION",
+    "DOCAI_PROCESSOR_ID",
+    "DOCAI_LAYOUT_PROCESSOR_ID",
+    "DOCAI_LAYOUT_PROCESSOR_VERSION",
 )
 
 
@@ -57,6 +61,13 @@ def test_all_required_env_vars_load_successfully(
     assert s.db_password == "test-pass"
     assert s.db_name == "test-db"
     assert s.gcs_bucket == "test-bucket"
+    assert s.docai_location == "us"
+    assert s.docai_processor_id == "test-processor"
+    assert s.docai_layout_processor_id == "test-layout-processor"
+    assert (
+        s.docai_layout_processor_version
+        == "pretrained-layout-parser-v1.5-2025-08-25"
+    )
 
 
 def test_load_settings_returns_settings_instance(
@@ -80,6 +91,9 @@ def test_load_settings_returns_settings_instance(
         "DB_PASSWORD",
         "DB_NAME",
         "GCS_BUCKET",
+        "DOCAI_LOCATION",
+        "DOCAI_PROCESSOR_ID",
+        "DOCAI_LAYOUT_PROCESSOR_ID",
     ],
 )
 def test_missing_required_raises_config_error(
@@ -139,6 +153,21 @@ def test_optional_gemini_model_override(
     assert s.gemini_model == "gemini-2.5-pro"
 
 
+def test_optional_docai_layout_processor_version_override(
+    monkeypatch: pytest.MonkeyPatch, env_defaults: dict[str, str]
+) -> None:
+    _apply_env(
+        monkeypatch,
+        {
+            **env_defaults,
+            "DOCAI_LAYOUT_PROCESSOR_VERSION": "custom-layout-version",
+        },
+    )
+    s = load_settings()
+
+    assert s.docai_layout_processor_version == "custom-layout-version"
+
+
 # ---------------------------------------------------------------------------
 # OS 환경변수 우선순위
 # ---------------------------------------------------------------------------
@@ -183,6 +212,16 @@ def test_reexported_constants_match_module_settings_instance() -> None:
     assert config_module.DB_NAME == config_module.settings.db_name
     assert config_module.GCS_BUCKET == config_module.settings.gcs_bucket
     assert config_module.GEMINI_MODEL == config_module.settings.gemini_model
+    assert config_module.DOCAI_LOCATION == config_module.settings.docai_location
+    assert config_module.DOCAI_PROCESSOR_ID == config_module.settings.docai_processor_id
+    assert (
+        config_module.DOCAI_LAYOUT_PROCESSOR_ID
+        == config_module.settings.docai_layout_processor_id
+    )
+    assert (
+        config_module.DOCAI_LAYOUT_PROCESSOR_VERSION
+        == config_module.settings.docai_layout_processor_version
+    )
 
 
 def test_config_error_is_runtime_error_subclass() -> None:
