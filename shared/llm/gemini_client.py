@@ -39,6 +39,53 @@ class LLMError(RuntimeError):
     """Gemini API 호출 중 발생한 모든 오류의 단일 타입."""
 
 
+def _stringify_value(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None:
+        return str(enum_value)
+
+    enum_name = getattr(value, "name", None)
+    if enum_name is not None:
+        return str(enum_name)
+
+    return str(value)
+
+
+def _summarize_empty_response(response: Any) -> str:
+    details: list[str] = []
+
+    response_id = _stringify_value(getattr(response, "response_id", None))
+    if response_id:
+        details.append(f"response_id={response_id}")
+
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    if prompt_feedback is not None:
+        block_reason = _stringify_value(getattr(prompt_feedback, "block_reason", None))
+        block_message = _stringify_value(
+            getattr(prompt_feedback, "block_reason_message", None)
+        )
+        if block_reason:
+            details.append(f"prompt_block_reason={block_reason}")
+        if block_message:
+            details.append(f"prompt_block_message={block_message}")
+
+    candidates = getattr(response, "candidates", None) or []
+    for index, candidate in enumerate(candidates):
+        finish_reason = _stringify_value(getattr(candidate, "finish_reason", None))
+        finish_message = _stringify_value(getattr(candidate, "finish_message", None))
+        if finish_reason:
+            details.append(f"candidate[{index}].finish_reason={finish_reason}")
+        if finish_message:
+            details.append(f"candidate[{index}].finish_message={finish_message}")
+
+    if not details:
+        return "no diagnostic fields present"
+    return "; ".join(details)
+
+
 class GeminiClient:
     """Vertex AI Gemini API 호출 래퍼.
 
@@ -139,7 +186,24 @@ class GeminiClient:
                 f"  (model={model or self._default_model})"
             )
 
-        return response.parsed if response_schema is not None else response.text
+        if response_schema is None:
+            if response.text is None:
+                raise LLMError(
+                    "Gemini returned empty response: "
+                    f"{_summarize_empty_response(response)}"
+                )
+            return response.text
+
+        if response.parsed is not None:
+            return response.parsed
+
+        if response.text is not None:
+            return response.text
+
+        raise LLMError(
+            "Gemini returned empty response: "
+            f"{_summarize_empty_response(response)}"
+        )
 
 
 gemini_client: GeminiClient = GeminiClient()
