@@ -3,7 +3,6 @@ import type {
   ClauseAnalysis,
   GeneralTerms,
   LeaseContractInput,
-  SpecialTerms,
   TermArticle,
 } from "@/types/contract";
 
@@ -31,8 +30,6 @@ const GENERAL_KEYS = [
   "art12",
   "art13",
 ] as const satisfies readonly (keyof GeneralTerms)[];
-
-const SPECIAL_KEYS = ["art1", "art2", "art3", "art4", "art5"] as const satisfies readonly (keyof SpecialTerms)[];
 
 function generalLabelFromKey(key: string): string {
   const n = Number(key.replace("art", ""));
@@ -77,8 +74,14 @@ export function inputToClauseViewItems(input: LeaseContractInput): ClauseViewIte
       items.push(termToView("general_terms", key, { ...art, text }));
     }
   });
-  SPECIAL_KEYS.forEach((key) => {
-    const art = input.special_terms?.[key];
+  const specialEntries = Object.entries(input.special_terms ?? {})
+    .filter(([key]) => key.startsWith("art"))
+    .sort((a, b) => {
+      const na = Number(a[0].replace("art", ""));
+      const nb = Number(b[0].replace("art", ""));
+      return (Number.isFinite(na) ? na : 999) - (Number.isFinite(nb) ? nb : 999);
+    });
+  specialEntries.forEach(([key, art]) => {
     const text = art?.text?.trim();
     if (art && text) {
       items.push(termToView("special_terms", key, art));

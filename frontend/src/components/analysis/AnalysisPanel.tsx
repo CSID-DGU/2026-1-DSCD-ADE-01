@@ -4,6 +4,7 @@ import { LawCard } from "@/components/analysis/LawCard";
 import { PrecedentCard } from "@/components/analysis/PrecedentCard";
 import { GuideChecklist } from "@/components/analysis/GuideChecklist";
 import { BottomActionBar } from "@/components/analysis/BottomActionBar";
+import { extractClauseFields } from "@/lib/clauseStructuring";
 
 type AnalysisPanelProps = {
   clause: Clause | null;
@@ -28,6 +29,7 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
 
   const { analysis } = clause;
   const clauseLabel = `${clause.label}${clause.title?.trim() ? ` ${clause.title.trim()}` : ""}`;
+  const structuredFields = extractClauseFields(clause.body);
 
   return (
     <div className="flex h-full max-h-full min-h-0 w-full min-w-0 flex-col bg-panel-bg/90">
@@ -35,6 +37,19 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
         <section className="space-y-2 border-b border-border-default pb-3">
           <h3 className="text-[15px] font-bold text-text-primary">선택 조항 요약</h3>
           <p className="text-sm font-semibold leading-relaxed text-text-primary">{clauseLabel}</p>
+          {structuredFields.length > 0 ? (
+            <div className="rounded-lg border border-border-default bg-white p-3 shadow-sm">
+              <p className="text-xs font-semibold text-text-secondary">핵심 항목</p>
+              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1.5">
+                {structuredFields.map((f) => (
+                  <div key={f.label} className="min-w-0">
+                    <dt className="text-[11px] text-text-secondary">{f.label}</dt>
+                    <dd className="truncate text-sm font-semibold text-text-primary">{f.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ) : null}
           <p className="whitespace-pre-wrap text-sm leading-[1.65] text-text-primary">{clause.body}</p>
         </section>
 

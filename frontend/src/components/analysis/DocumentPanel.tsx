@@ -68,14 +68,19 @@ export function DocumentPanel({
   const general = clauses.filter((c) => c.group === "general_terms");
   const special = clauses.filter((c) => c.group === "special_terms");
 
-  const renderGroup = (label: string, list: Clause[]) => {
+  const renderGroup = (label: string, list: Clause[], defaultOpen = true) => {
     if (list.length === 0) return null;
     return (
-      <div className="mt-4 first:mt-0">
-        <p className="mb-2 px-0.5 text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
-          {label}
-        </p>
-        <div className="rounded-sm border border-border-default bg-transparent">
+      <details className="mt-4 first:mt-0 rounded-md border border-border-default bg-white" open={defaultOpen}>
+        <summary className="cursor-pointer list-none px-3 py-2.5 [&::-webkit-details-marker]:hidden">
+          <span className="inline-flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-text-secondary">
+            {label}
+            <span className="rounded bg-page-bg px-1.5 py-0.5 text-[10px] text-text-secondary/90">
+              {list.length}개
+            </span>
+          </span>
+        </summary>
+        <div className="border-t border-border-default">
           <p className="sr-only">
             계약서 조항. 항목을 선택하면 우측 분석 패널이 갱신됩니다.
           </p>
@@ -91,7 +96,7 @@ export function DocumentPanel({
             ))}
           </ul>
         </div>
-      </div>
+      </details>
     );
   };
 
@@ -115,8 +120,8 @@ export function DocumentPanel({
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain px-3 pb-3 pt-2 sm:px-5">
         <ContractPropertySummary leaseType={leaseType} propertyInfo={propertyInfo} />
 
-        {renderGroup("일반 조항", general)}
-        {renderGroup("특약 사항", special)}
+        {renderGroup("기본 조항", general, true)}
+        {renderGroup("특약 사항", special, true)}
       </div>
     </div>
   );

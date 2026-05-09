@@ -3,7 +3,9 @@
 import type { DragEvent } from "react";
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { FileUp, Loader2 } from "lucide-react";
+import { ArrowRight, CheckCircle2, Circle, FileUp, Loader2 } from "lucide-react";
+import { analyzeContract } from "@/lib/contractApi";
+import { saveContractResult, toContractViewModel } from "@/lib/contractResultAdapter";
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPT =
@@ -26,6 +28,12 @@ function formatSize(bytes: number): string {
 }
 
 type Preview = { name: string; ext: string; sizeLabel: string };
+const PROCESS_STEPS = [
+  "파일 업로드",
+  "계약서 파싱",
+  "특약 확장 (Query Expansion)",
+  "결과 렌더링",
+] as const;
 
 /**
  * 껍데기는 UploadWorkspaceShell이 담당합니다. 여기서는 본문·드롭존만 렌더링합니다.
@@ -34,9 +42,12 @@ export function UploadDropzone() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [progressLabel, setProgressLabel] = useState<string | null>(null);
+  const [activeStep, setActiveStep] = useState<number | null>(null);
+  const [completedStep, setCompletedStep] = useState<number>(-1);
 
   const processFile = useCallback((file: File | undefined) => {
     if (!file) return;
@@ -44,11 +55,13 @@ export function UploadDropzone() {
     if (!isAllowedFile(file)) {
       setError("PDF 또는 DOCX 파일만 업로드할 수 있습니다.");
       setPreview(null);
+      setSelectedFile(null);
       return;
     }
     if (file.size > MAX_BYTES) {
       setError("파일 크기는 20MB 이하여야 합니다.");
       setPreview(null);
+      setSelectedFile(null);
       return;
     }
     const dot = file.name.lastIndexOf(".");
@@ -58,6 +71,10 @@ export function UploadDropzone() {
       ext,
       sizeLabel: formatSize(file.size),
     });
+    setSelectedFile(file);
+    setProgressLabel(null);
+    setActiveStep(null);
+    setCompletedStep(-1);
   }, []);
 
   const handleFileChange = () => {
@@ -81,26 +98,41 @@ export function UploadDropzone() {
     processFile(file);
   };
 
-  const runMockAnalysis = () => {
-    if (!preview || busy) return;
+  const startAnalysis = async () => {
+    if (!selectedFile || busy) return;
     setBusy(true);
-    const steps = [
-      "파일 확인 중",
-      "조항 추출 중",
-      "관련 법령·판례 검색 중",
-      "분석 결과 생성 중",
-    ] as const;
-    let i = 0;
-    const tick = () => {
-      if (i < steps.length) {
-        setProgressLabel(steps[i]);
-        i += 1;
-        window.setTimeout(tick, 340);
-      } else {
-        router.push("/contract-analysis");
-      }
-    };
-    tick();
+    setError(null);
+    setProgressLabel("1/4 파일 업로드 진행 중");
+    setActiveStep(0);
+    setCompletedStep(-1);
+
+    try {
+      const apiResult = await analyzeContract(selectedFile);
+      setCompletedStep(0);
+      setActiveStep(1);
+      setProgressLabel("2/4 계약서 파싱 완료");
+
+      setCompletedStep(1);
+      setActiveStep(2);
+      setProgressLabel("3/4 특약 확장(Query Expansion) 반영 중");
+      const contract = toContractViewModel(apiResult, {
+        displayFileName: selectedFile.name,
+      });
+
+      setCompletedStep(2);
+      setActiveStep(3);
+      setProgressLabel("4/4 분석 결과 렌더링 준비 중");
+      saveContractResult(contract);
+      setCompletedStep(3);
+      setProgressLabel("파이프라인 완료, 결과 화면으로 이동합니다.");
+      router.push("/contract-analysis");
+    } catch {
+      setError("분석 요청 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+      setBusy(false);
+      setProgressLabel(null);
+      setActiveStep(null);
+      setCompletedStep(-1);
+    }
   };
 
   return (
@@ -164,15 +196,44 @@ export function UploadDropzone() {
               </div>
             </dl>
             {progressLabel ? (
-              <p className="mt-3 flex items-center gap-2 text-xs font-medium text-primary-navy">
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
-                {progressLabel}
-              </p>
+              <div className="mt-3 space-y-2">
+                <p className="flex items-center gap-2 text-xs font-medium text-primary-navy">
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" aria-hidden />
+                  {progressLabel}
+                </p>
+                <ol className="rounded-md border border-border-default bg-white px-2 py-2">
+                  {PROCESS_STEPS.map((step, idx) => {
+                    const done = idx <= completedStep;
+                    const current = activeStep === idx && !done;
+                    return (
+                      <li key={step} className="flex items-center gap-2 py-1 text-xs">
+                        {done ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-hidden />
+                        ) : current ? (
+                          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary-navy" aria-hidden />
+                        ) : (
+                          <Circle className="h-3.5 w-3.5 shrink-0 text-text-secondary/60" aria-hidden />
+                        )}
+                        <span
+                          className={
+                            done || current ? "font-semibold text-text-primary" : "text-text-secondary"
+                          }
+                        >
+                          {step}
+                        </span>
+                        {current && idx < PROCESS_STEPS.length - 1 ? (
+                          <ArrowRight className="ml-auto h-3.5 w-3.5 text-primary-navy/70" aria-hidden />
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </div>
             ) : null}
             <button
               type="button"
-              onClick={runMockAnalysis}
-              disabled={busy}
+              onClick={startAnalysis}
+              disabled={busy || !selectedFile}
               className="mt-4 w-full rounded-lg border border-primary-navy bg-white py-2.5 text-sm font-semibold text-primary-navy transition hover:bg-page-bg disabled:opacity-50"
             >
               분석 시작

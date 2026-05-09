@@ -88,13 +88,7 @@ export type GeneralTerms = {
   art13?: TermArticle;
 };
 
-export type SpecialTerms = {
-  art1?: TermArticle;
-  art2?: TermArticle;
-  art3?: TermArticle;
-  art4?: TermArticle;
-  art5?: TermArticle;
-};
+export type SpecialTerms = Record<string, TermArticle | undefined>;
 
 /** 백엔드/OCR 입력 스키마 */
 export type LeaseContractInput = {
