@@ -4,8 +4,13 @@ import type { DragEvent } from "react";
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowRight, CheckCircle2, Circle, FileUp, Loader2 } from "lucide-react";
-import { analyzeContract } from "@/lib/contractApi";
-import { saveContractResult, toContractViewModel } from "@/lib/contractResultAdapter";
+import { runV1ContractPipeline } from "@/lib/contractApi";
+import {
+  clearV1Session,
+  saveContractResult,
+  saveV1Meta,
+  toContractViewModel,
+} from "@/lib/contractResultAdapter";
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPT =
@@ -75,6 +80,7 @@ export function UploadDropzone() {
     setProgressLabel(null);
     setActiveStep(null);
     setCompletedStep(-1);
+    clearV1Session();
   }, []);
 
   const handleFileChange = () => {
@@ -107,14 +113,19 @@ export function UploadDropzone() {
     setCompletedStep(-1);
 
     try {
-      const apiResult = await analyzeContract(selectedFile);
+      const { data: apiResult, expansionSkipped, expansionSkipReason } =
+        await runV1ContractPipeline(selectedFile);
       setCompletedStep(0);
       setActiveStep(1);
       setProgressLabel("2/4 계약서 파싱 완료");
 
       setCompletedStep(1);
       setActiveStep(2);
-      setProgressLabel("3/4 특약 확장(Query Expansion) 반영 중");
+      setProgressLabel(
+        expansionSkipped
+          ? "3/4 특약 확장 — 서버 오류로 생략됨(파싱 결과만 사용)"
+          : "3/4 특약 확장(Query Expansion) 반영 중",
+      );
       const contract = toContractViewModel(apiResult, {
         displayFileName: selectedFile.name,
       });
@@ -123,11 +134,17 @@ export function UploadDropzone() {
       setActiveStep(3);
       setProgressLabel("4/4 분석 결과 렌더링 준비 중");
       saveContractResult(contract);
+      saveV1Meta({ expansionSkipped, expansionSkipReason });
       setCompletedStep(3);
-      setProgressLabel("파이프라인 완료, 결과 화면으로 이동합니다.");
+      setProgressLabel(
+        expansionSkipped
+          ? "파이프라인 완료(파싱만). 결과 화면으로 이동합니다."
+          : "파이프라인 완료, 결과 화면으로 이동합니다.",
+      );
       router.push("/contract-analysis");
-    } catch {
-      setError("분석 요청 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "분석 요청 중 오류가 발생했습니다.";
+      setError(msg || "분석 요청 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.");
       setBusy(false);
       setProgressLabel(null);
       setActiveStep(null);

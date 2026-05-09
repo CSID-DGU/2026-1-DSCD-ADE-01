@@ -3,6 +3,12 @@ import type { AnalyzeContractApiResponse, SpecialTermExpansionResult } from "@/t
 import type { ClauseAnalysis, ContractMock, GuideItem, LeaseContractInput } from "@/types/contract";
 
 export const CONTRACT_ANALYSIS_STORAGE_KEY = "contractAnalysis.v1.result";
+export const CONTRACT_ANALYSIS_META_KEY = "contractAnalysis.v1.meta";
+
+export type V1ResultMeta = {
+  expansionSkipped: boolean;
+  expansionSkipReason?: string;
+};
 
 type BuildContractOptions = {
   displayFileName: string;
@@ -119,6 +125,25 @@ export function toContractViewModel(
 
 export function saveContractResult(contract: ContractMock): void {
   sessionStorage.setItem(CONTRACT_ANALYSIS_STORAGE_KEY, JSON.stringify(contract));
+}
+
+export function saveV1Meta(meta: V1ResultMeta): void {
+  sessionStorage.setItem(CONTRACT_ANALYSIS_META_KEY, JSON.stringify(meta));
+}
+
+export function loadV1Meta(): V1ResultMeta | null {
+  const raw = sessionStorage.getItem(CONTRACT_ANALYSIS_META_KEY);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as V1ResultMeta;
+  } catch {
+    return null;
+  }
+}
+
+export function clearV1Session(): void {
+  sessionStorage.removeItem(CONTRACT_ANALYSIS_STORAGE_KEY);
+  sessionStorage.removeItem(CONTRACT_ANALYSIS_META_KEY);
 }
 
 export function loadStoredContractResult(): ContractMock | null {

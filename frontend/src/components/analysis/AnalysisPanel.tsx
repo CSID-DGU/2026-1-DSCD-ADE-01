@@ -62,7 +62,9 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
               ))}
             </div>
           ) : (
-            <EmptyHint>관련 법령이 충분히 검색되지 않았습니다.</EmptyHint>
+            <EmptyHint>
+              현재 백엔드 v1에서는 RAG 기반 관련 법령 검색 결과를 내려주지 않습니다. v2 단계에서 이 블록이 채워집니다.
+            </EmptyHint>
           )}
         </section>
 
@@ -81,14 +83,17 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
               ))}
             </div>
           ) : (
-            <EmptyHint>관련 판례가 충분히 검색되지 않았습니다.</EmptyHint>
+            <EmptyHint>
+              현재 백엔드 v1에서는 RAG 기반 관련 판례 검색 결과를 내려주지 않습니다. v2 단계에서 이 블록이 채워집니다.
+            </EmptyHint>
           )}
         </section>
 
         <section className="space-y-2">
           <h3 className="text-[15px] font-bold text-text-primary">보완 가이드</h3>
           <p className="text-[11px] leading-relaxed text-text-secondary">
-            조항 기준 최종 확인·보완 사항입니다. (판례 카드 안의 「판례 기반 보완 가이드」와 구분됩니다.)
+            v2에서는 조항별 LLM 체크리스트가 여기 표시됩니다. 특약에 한해 목록에 Query Expansion 기반 참고 문구가 있을 수
+            있습니다. 최종 검토 포인트는 RAG·LLM 연동 후 교체될 수 있습니다.
           </p>
           {analysis.supplementGuide.length > 0 ? (
             <GuideChecklist
@@ -99,7 +104,9 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
               clauseSourcePath={clause.sourcePath}
             />
           ) : (
-            <EmptyHint>현재 조항에 대한 보완 가이드가 없습니다.</EmptyHint>
+            <EmptyHint>
+              아직 생성된 항목이 없습니다. 최종 조항별 보완 가이드는 LLM 분석 단계(v2 이후)에서 제공됩니다.
+            </EmptyHint>
           )}
         </section>
 
