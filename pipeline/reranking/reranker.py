@@ -33,7 +33,7 @@ BM25_LAW_JSON   = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_law.js
 DENSE_LAW_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_law.json"
 
 # 판례 BM25 / Dense
-DENSE_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_lawcase.json"
+BM25_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_lawcase.json"
 DENSE_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_lawcase.json"
 
 # 식별자 필드명
