@@ -37,7 +37,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # 입력
-QUERY_EXPANSION_PATH = BASE_DIR / "query_expansion.json"
+QUERY_EXPANSION_PATH = BASE_DIR / "query_expansion.json" # 이후 쿼리 익스펜션으로 변경해야 함
 
 LAW_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "law_child.csv"
 PREC_PATH = BASE_DIR.parent.parent / "output" / "case_law_with_embeddings.csv"

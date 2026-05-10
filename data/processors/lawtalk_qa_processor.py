@@ -4,6 +4,8 @@ import json
 import re
 from pathlib import Path
 
+from pydantic import BaseModel, Field
+
 
 TARGET_LAWS = [
     "민법",
@@ -20,12 +22,89 @@ TARGET_LAWS = [
 ]
 
 SPECIAL_KEYWORDS = ["특약", "특약사항", "특약조항", "특약 조항"]
+RULE_BASED_FILTERED_FILES = [
+    "qa_both.json",
+    "qa_law_only.json",
+    "qa_precedent_only.json",
+]
+
+
+class ExtractedClausesResult(BaseModel):
+    """rule-based 특약 후보에서 실제 계약서 특약 문구를 고른 결과."""
+
+    extracted_clauses: list[str] = Field(
+        description=(
+            "special_clauses 안에서 실제 계약서에 존재할 만한 특약 문구만 넣습니다. "
+            "질문, 상담 요청, 배경 설명, 법률 판단 질문은 제외합니다."
+        )
+    )
+
+
+class LawtalkAnswerAnalysis(BaseModel):
+    """DB 적재용 answers 확장 필드 추출 결과."""
+
+    dispute_background: str = Field(
+        description=(
+            "질문 본문에서 추출한 분쟁 배경입니다. 당사자 관계, 계약 내용, "
+            "문제 발생 경위를 중심으로 3~5문장으로 작성합니다."
+        )
+    )
+    lawyer_conclusion: str = Field(
+        description=(
+            "변호사 답변의 최종 결론입니다. 유효, 무효, 일부무효 등 "
+            "법적 판단을 중심으로 1~2문장으로 작성합니다."
+        )
+    )
+    lawyer_reasoning: str = Field(
+        description=(
+            "변호사 답변의 법리 근거입니다. 답변에 명시된 내용만 "
+            "개조식 3~5줄로 작성하고, 추론은 '(추론)'으로 표시합니다."
+        )
+    )
+    action_checklist: str = Field(
+        description=(
+            "변호사 답변에서 질문자가 취해야 할 행동 또는 주의사항입니다. "
+            "답변 본문에 명시된 내용만 항목별로 작성합니다."
+        )
+    )
+
+
+LAWTALK_DB_ANALYSIS_SYSTEM_PROMPT = """당신은 한국 임대차 법률 상담 분석 전문가입니다.
+주어진 법률 상담 QA를 읽고 DB 스키마에 필요한 필드만 정확히 추출하세요.
+
+---
+
+[필드별 추출 지침]
+
+dispute_background
+- 질문 본문에서 분쟁 배경을 3~5문장으로 압축
+- 당사자 관계, 계약 내용, 문제 발생 경위 중심으로 서술
+
+lawyer_conclusion
+- 변호사 답변의 최종 결론을 1~2문장으로 서술
+- 유효/무효/일부무효 등 법적 판단을 중심으로 명확하게 서술
+
+lawyer_reasoning
+- 변호사 답변의 법리 근거를 개조식 3~5줄로 정리
+- 답변에 명시된 내용은 팩트로, 답변에서 추론된 내용은 "(추론)"으로 표시
+- 새로운 해석이나 추가 설명 금지
+
+action_checklist
+- 변호사 답변에서 질문자가 취해야 할 행동이나 주의해야 할 사항을 항목별로 추출
+- 답변 본문에 명시된 내용만 작성
+"""
 
 
 def add_unique(items, value):
     """리스트에 같은 값이 없을 때만 값을 추가한다."""
     if value not in items:
         items.append(value)
+
+
+def debug_log(enabled, message):
+    """디버그 모드일 때만 추적 로그를 출력한다."""
+    if enabled:
+        print(f"[lawtalk_qa][debug] {message}", flush=True)
 
 
 def make_law_reference(law_name, article_number, sub_article_number):
@@ -170,6 +249,112 @@ def extract_special_clauses(question_body):
     return special_clauses
 
 
+def build_clause_postprocess_prompt(special_clauses):
+    """1차 rule-based 결과의 special_clauses만 사용해 특약 후처리 프롬프트를 만든다."""
+    lines = [
+        "다음 special_clauses 목록에서 실제 계약서에 존재할 만한 특약 문구만 골라주세요.",
+        "규칙:",
+        "1. 질문자의 질문, 상담 요청, 배경 설명은 제외합니다.",
+        "2. 계약서에 실제로 적혀 있을 만한 약정 문구만 extracted_clauses에 넣습니다.",
+        "3. 원문에 없는 새로운 내용을 만들지 않습니다.",
+        "4. 문장을 다듬더라도 의미를 바꾸지 않습니다.",
+        "5. 실제 특약 문구가 없으면 extracted_clauses에 빈 리스트를 넣습니다.",
+        "",
+        "special_clauses:",
+    ]
+
+    for index, clause in enumerate(special_clauses, start=1):
+        lines.append(f"{index}. {clause}")
+
+    return "\n".join(lines)
+
+
+def extract_clauses_from_special_clauses_with_llm(special_clauses):
+    """1차 rule-based special_clauses에서 실제 계약서 특약 문구만 LLM으로 추출한다."""
+    from shared.llm.gemini_client import gemini_client
+
+    prompt = build_clause_postprocess_prompt(special_clauses)
+    result = gemini_client.generate(
+        prompt,
+        response_schema=ExtractedClausesResult,
+    )
+    return result.extracted_clauses
+
+
+def build_answer_analysis_prompt(question_record, answer_item):
+    """DB 적재용 답변 분석 프롬프트를 만든다."""
+    return "\n".join(
+        [
+            "다음 법률 상담 QA를 DB 스키마 필드에 맞게 분석하세요.",
+            "출력 필드는 dispute_background, lawyer_conclusion, "
+            "lawyer_reasoning, action_checklist 네 개만 사용합니다.",
+            "",
+            "[질문 제목]",
+            str(question_record.get("question_title", "")),
+            "",
+            "[질문 본문]",
+            str(question_record.get("question_body", "")),
+            "",
+            "[변호사 이름]",
+            str(answer_item.get("lawyer", "")),
+            "",
+            "[변호사 답변]",
+            str(answer_item.get("answer", "")),
+        ]
+    )
+
+
+def analyze_answer_for_db_with_llm(question_record, answer_item):
+    """질문과 답변 하나를 LLM으로 분석해 DB 적재용 확장 필드를 만든다."""
+    from shared.llm.gemini_client import gemini_client
+
+    prompt = build_answer_analysis_prompt(question_record, answer_item)
+    return gemini_client.generate(
+        prompt,
+        system_instruction=LAWTALK_DB_ANALYSIS_SYSTEM_PROMPT,
+        response_schema=LawtalkAnswerAnalysis,
+    )
+
+
+def build_question_row(record):
+    """원본 질문 레코드를 questions 테이블 형태로 바꾼다."""
+    return {
+        "id": record.get("index"),
+        "title": record.get("question_title"),
+        "body": record.get("question_body"),
+        "tags": record.get("tags", []),
+        "written_at": record.get("question_written_at_raw"),
+        "embedding": None,
+    }
+
+
+def build_answer_row(answer_id, question_id, answer_item, analysis):
+    """원본 답변과 LLM 분석 결과를 answers 테이블 형태로 바꾼다."""
+    return {
+        "id": answer_id,
+        "question_id": question_id,
+        "lawyer_name": answer_item.get("lawyer"),
+        "answer_body": dict(answer_item),
+        "written_at": answer_item.get("written_at_raw"),
+        "dispute_background": analysis.dispute_background,
+        "lawyer_conclusion": analysis.lawyer_conclusion,
+        "lawyer_reasoning": analysis.lawyer_reasoning,
+        "action_checklist": analysis.action_checklist,
+    }
+
+
+def iter_answer_items(records):
+    """원본 질문 목록에서 답변을 안정적인 순서와 ID로 순회한다."""
+    answer_id = 1
+
+    for record in records:
+        question_id = record.get("index")
+
+        for answer_item in record.get("all_answers", []):
+            yield answer_id, question_id, record, answer_item
+            answer_id = answer_id + 1
+
+
 def process_record(record):
     """로톡 QA 레코드 하나를 필터링하고 출력 형식으로 바꾼다."""
     question_body = record.get("question_body", "")
@@ -211,6 +396,231 @@ def write_json(file_path, records):
     """레코드 목록을 JSON 파일로 저장한다."""
     with open(file_path, "w", encoding="utf-8") as file:
         json.dump(records, file, ensure_ascii=False, indent=2)
+
+
+def load_rule_based_filtered_records(input_dir):
+    """1차 rule-based 결과 세 파일을 읽고 source 메타데이터를 붙인다."""
+    input_path = Path(input_dir)
+    records = []
+
+    for source_file in RULE_BASED_FILTERED_FILES:
+        source_path = input_path / source_file
+        source_records = read_records_from_file(source_path)
+
+        for source_position, record in enumerate(source_records, start=1):
+            merged_record = dict(record)
+            merged_record["source_file"] = source_file
+            merged_record["source_position"] = source_position
+            records.append(merged_record)
+
+    return records
+
+
+def process_rule_based_filtered_clauses(
+    input_dir="data/lawtalk_qa_filtered",
+    output_file=None,
+    clause_extractor=None,
+    debug=False,
+    limit=None,
+):
+    """1차 rule-based 결과를 LLM으로 후처리하고 매 레코드마다 결과 파일을 갱신한다."""
+    input_path = Path(input_dir)
+    output_path = (
+        Path(output_file)
+        if output_file is not None
+        else input_path / "qa_clauses_processed.json"
+    )
+    extractor = clause_extractor or extract_clauses_from_special_clauses_with_llm
+    source_records = load_rule_based_filtered_records(input_path)
+
+    if output_path.exists():
+        processed_records = read_records_from_file(output_path)
+    else:
+        processed_records = []
+
+    processed_keys = {
+        (record.get("source_file"), record.get("source_position"))
+        for record in processed_records
+    }
+    processed_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    debug_log(
+        debug,
+        (
+            f"clause_postprocess_start input_dir={input_path} "
+            f"output_file={output_path} limit={limit}"
+        ),
+    )
+
+    for record in source_records:
+        key = (record["source_file"], record["source_position"])
+
+        if key in processed_keys:
+            skipped_count = skipped_count + 1
+            debug_log(
+                debug,
+                (
+                    f"clause_postprocess_skip source_file={record['source_file']} "
+                    f"source_position={record['source_position']} reason=already_processed"
+                ),
+            )
+            continue
+
+        if limit is not None and processed_count >= limit:
+            debug_log(debug, f"clause_postprocess_limit_reached limit={limit}")
+            break
+
+        special_clauses = record.get("special_clauses", [])
+        debug_log(
+            debug,
+            (
+                f"clause_postprocess_start_record source_file={record['source_file']} "
+                f"source_position={record['source_position']} "
+                f"special_clause_count={len(special_clauses)}"
+            ),
+        )
+
+        output_record = dict(record)
+
+        try:
+            output_record["extracted_clauses"] = extractor(special_clauses)
+            output_record["clause_processing_status"] = "success"
+        except Exception as exc:
+            output_record["extracted_clauses"] = []
+            output_record["clause_processing_status"] = "failed"
+            output_record["clause_processing_error"] = str(exc)
+            failed_count = failed_count + 1
+
+        processed_records.append(output_record)
+        processed_keys.add(key)
+        processed_count = processed_count + 1
+        write_json(output_path, processed_records)
+
+        debug_log(
+            debug,
+            (
+                f"clause_postprocess_done_record source_file={record['source_file']} "
+                f"source_position={record['source_position']} "
+                f"status={output_record['clause_processing_status']} "
+                f"extracted_count={len(output_record['extracted_clauses'])}"
+            ),
+        )
+
+    debug_log(debug, "clause_postprocess_done")
+
+    return {
+        "total_records": len(source_records),
+        "processed_count": processed_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+    }
+
+
+def prepare_db_ready_records(
+    input_file="data/raw/lawtalk_QA_Context.json",
+    output_file=None,
+    answer_analyzer=None,
+    debug=False,
+    limit=None,
+):
+    """로톡 QA 원본을 questions/answers DB 적재용 JSON으로 전처리한다."""
+    input_path = Path(input_file)
+    output_path = Path(
+        output_file or "data/lawtalk_qa_preprocessed/lawtalk_qa_db_ready.json"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    analyzer = answer_analyzer or analyze_answer_for_db_with_llm
+    source_records = read_records_from_file(input_path)
+    question_rows = [build_question_row(record) for record in source_records]
+    answer_items = list(iter_answer_items(source_records))
+
+    if output_path.exists():
+        output_records = read_records_from_file(output_path)
+        processed_answers = output_records.get("answers", [])
+    else:
+        processed_answers = []
+
+    processed_answer_ids = {answer.get("id") for answer in processed_answers}
+    output_records = {
+        "questions": question_rows,
+        "answers": processed_answers,
+    }
+
+    processed_count = 0
+    skipped_count = 0
+    failed_count = 0
+
+    write_json(output_path, output_records)
+    debug_log(
+        debug,
+        (
+            f"db_prepare_start input_file={input_path} "
+            f"output_file={output_path} limit={limit}"
+        ),
+    )
+
+    for answer_id, question_id, question_record, answer_item in answer_items:
+        if answer_id in processed_answer_ids:
+            skipped_count = skipped_count + 1
+            debug_log(
+                debug,
+                f"db_prepare_skip answer_id={answer_id} reason=already_processed",
+            )
+            continue
+
+        if limit is not None and processed_count >= limit:
+            debug_log(debug, f"db_prepare_limit_reached limit={limit}")
+            break
+
+        debug_log(
+            debug,
+            (
+                f"db_prepare_start_answer answer_id={answer_id} "
+                f"question_id={question_id}"
+            ),
+        )
+
+        try:
+            analysis = analyzer(question_record, answer_item)
+            answer_row = build_answer_row(
+                answer_id,
+                question_id,
+                answer_item,
+                analysis,
+            )
+            output_records["answers"].append(answer_row)
+            processed_answer_ids.add(answer_id)
+        except Exception as exc:
+            failed_count = failed_count + 1
+            debug_log(
+                debug,
+                (
+                    f"db_prepare_failed answer_id={answer_id} "
+                    f"question_id={question_id} error={exc}"
+                ),
+            )
+
+        processed_count = processed_count + 1
+        write_json(output_path, output_records)
+        debug_log(
+            debug,
+            (
+                f"db_prepare_done_answer answer_id={answer_id} "
+                f"question_id={question_id}"
+            ),
+        )
+
+    debug_log(debug, "db_prepare_done")
+
+    return {
+        "total_questions": len(question_rows),
+        "total_answers": len(answer_items),
+        "processed_count": processed_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+    }
 
 
 def run(input_dir="data/lawtalk_qa", output_dir="data/lawtalk_qa_filtered"):
