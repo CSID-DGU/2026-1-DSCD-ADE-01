@@ -213,12 +213,12 @@ const analysesBySourcePath: Record<string, ClauseAnalysis> = {
 
 const leaseInputBody = {
   id: "ctr_mock_001",
-  title: "서울시 ○○구 단독주택 임대차 계약서",
+  title: "서울특별시 강서구 단독주택 임대차 계약서",
   displayFileName: "공덕동_주택 임대차계약서.pdf",
   lease_type: "주택임대차",
   property_info: {
     lease_category: "주택 임대차",
-    address: "서울시 ○○구 ○○로 12 (단독주택 전층)",
+    address: "서울특별시 강서구 화곡동 123",
     building_type: "단독주택",
     leased_part: "전층 (지상 1층·2층)",
     contract_type: "신규",

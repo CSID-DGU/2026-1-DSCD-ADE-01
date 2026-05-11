@@ -26,7 +26,7 @@ function ContractPropertySummary({
   const p = propertyInfo ?? {};
   const rows: { k: string; v: string }[] = [
     { k: "계약 유형", v: dash(p.lease_category || leaseType) },
-    { k: "주소", v: dash(p.address) },
+    { k: "소재지(건물)", v: dash(p.address) },
     { k: "건물 유형", v: dash(p.building_type) },
     { k: "임차 부분", v: dash(p.leased_part) },
     { k: "계약 종류", v: dash(p.contract_type) },
