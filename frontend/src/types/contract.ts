@@ -10,8 +10,10 @@ export type LawWarning = {
 export type LawItem = {
   id: string;
   title: string;
-  article: string;
+  article?: string;
   summary: string;
+  violationStatus?: "안전" | "문제없음" | "주의" | "위법가능" | "위법소지높음";
+  violationReason?: string;
   fullText?: string;
   applicationReason?: string;
   warning?: LawWarning;
@@ -26,9 +28,9 @@ export type GuideItem = {
 export type PrecedentItem = {
   id: string;
   title?: string;
-  caseNumber: string;
-  court: string;
-  tags: string[];
+  caseNumber?: string;
+  court?: string;
+  tags?: string[];
   summary: string;
   implication?: string;
   conflictSummary?: string;
@@ -37,10 +39,34 @@ export type PrecedentItem = {
   supplementGuide?: GuideItem[];
 };
 
+export type ClauseRevision = {
+  target: string;
+  reason: string;
+  direction: string;
+};
+
+export type ContractChecklistItem = {
+  id: string;
+  item: string;
+  description: string;
+  basis: string;
+  checked?: boolean;
+};
+
+export type RelatedClauseItem = {
+  clauseId: string;
+  clauseText: string;
+  relation: string;
+};
+
 export type ClauseAnalysis = {
   relatedLaws: LawItem[];
   precedents: PrecedentItem[];
   supplementGuide: GuideItem[];
+  clauseText?: string;
+  clauseRevision?: ClauseRevision;
+  contractChecklist?: ContractChecklistItem[];
+  relatedClauses?: RelatedClauseItem[];
 };
 
 export type ClauseGroup = "general_terms" | "special_terms";

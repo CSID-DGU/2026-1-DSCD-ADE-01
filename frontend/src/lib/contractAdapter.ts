@@ -120,5 +120,9 @@ function emptyAnalysis(): ClauseAnalysis {
     relatedLaws: [],
     precedents: [],
     supplementGuide: [] as ClauseAnalysis["supplementGuide"],
+    clauseText: "",
+    clauseRevision: undefined,
+    contractChecklist: [],
+    relatedClauses: [],
   };
 }
