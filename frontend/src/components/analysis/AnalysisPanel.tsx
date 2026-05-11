@@ -53,7 +53,14 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
           {analysis.relatedLaws.length > 0 ? (
             <div className="flex flex-col gap-2">
               {analysis.relatedLaws.map((law, i) => (
-                <LawCard key={law.id} law={law} index={i + 1} />
+                <LawCard
+                  key={law.id}
+                  law={law}
+                  index={i + 1}
+                  clauseId={clause.id}
+                  clauseLabel={clauseLabel}
+                  clauseSourcePath={clause.sourcePath}
+                />
               ))}
             </div>
           ) : (
@@ -131,7 +138,6 @@ export function AnalysisPanel({ clause }: AnalysisPanelProps) {
                     <div className="min-w-0">
                       <p className="font-semibold text-text-primary">{item.item}</p>
                       <p className="mt-1 whitespace-pre-wrap">{item.description}</p>
-                      <p className="mt-1 text-xs text-text-secondary">근거: {item.basis}</p>
                     </div>
                   </li>
                 ))}

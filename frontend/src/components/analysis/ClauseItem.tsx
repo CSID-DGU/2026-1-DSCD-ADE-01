@@ -24,7 +24,11 @@ export function ClauseItem({ clause, selected, onSelect }: ClauseItemProps) {
             <span className="text-xs font-semibold text-text-secondary">({clause.title})</span>
           ) : null}
         </div>
-        <span className="mt-2 block whitespace-pre-wrap text-[13px] leading-[1.65] text-text-primary/92">
+        <span
+          className={`mt-2 block text-[13px] leading-[1.65] text-text-primary/92 ${
+            selected ? "whitespace-pre-wrap" : "truncate"
+          }`}
+        >
           {clause.body}
         </span>
       </div>

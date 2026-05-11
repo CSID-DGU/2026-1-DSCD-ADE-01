@@ -4,17 +4,19 @@ import { useState } from "react";
 import type { LawItem } from "@/types/contract";
 import { TextDetailModal } from "@/components/analysis/TextDetailModal";
 import { AlertTriangle } from "lucide-react";
+import { openChatbotPanel } from "@/lib/chatbotEvents";
 
 type LawCardProps = {
   law: LawItem;
   index: number;
+  clauseId: string;
+  clauseLabel: string;
+  clauseSourcePath: string;
 };
 
-export function LawCard({ law, index }: LawCardProps) {
-  const [reasonOpen, setReasonOpen] = useState(false);
+export function LawCard({ law, index, clauseId, clauseLabel, clauseSourcePath }: LawCardProps) {
   const [fullOpen, setFullOpen] = useState(false);
 
-  const applicationReason = law.applicationReason?.trim();
   const violationStatus = law.violationStatus || law.warning?.level || "문제없음";
   const violationReason = law.violationReason || law.warning?.reason;
   const isSafeStatus = violationStatus === "안전" || violationStatus === "문제없음";
@@ -31,6 +33,17 @@ export function LawCard({ law, index }: LawCardProps) {
   const fullBody =
     law.fullText?.trim() ||
     "임시 법령 원문 데이터입니다. 실제 서비스에서는 법령 API 또는 RAG 검색 결과가 연결됩니다.";
+  const askAboutLaw = () => {
+    openChatbotPanel({
+      initialMessage: `${law.title} ${law.article || ""} 법령이 현재 선택한 조항에 어떤 영향을 주는지 설명해줘.`,
+      context: {
+        clauseId,
+        clauseLabel,
+        clauseSourcePath,
+        source: "law",
+      },
+    });
+  };
 
   return (
     <>
@@ -60,13 +73,6 @@ export function LawCard({ law, index }: LawCardProps) {
               </aside>
             ) : null}
 
-            {reasonOpen ? (
-              <p className="mt-2 whitespace-pre-wrap rounded-md border border-border-default bg-panel-bg px-3 py-2 text-sm leading-relaxed text-text-secondary">
-                {applicationReason ||
-                  "등록된 적용 이유가 없습니다. 요약 문구를 참고하거나 추후 분석 결과가 연결됩니다."}
-              </p>
-            ) : null}
-
             <div className="mt-3 flex flex-wrap gap-2">
               <button
                 type="button"
@@ -77,10 +83,10 @@ export function LawCard({ law, index }: LawCardProps) {
               </button>
               <button
                 type="button"
-                onClick={() => setReasonOpen((v) => !v)}
+                onClick={askAboutLaw}
                 className="rounded-md border border-border-default bg-panel-bg px-2.5 py-1 text-xs font-medium text-text-primary transition hover:bg-page-bg"
               >
-                법령 관련 사유
+                챗봇에게 이 법령 질문하기
               </button>
             </div>
           </div>
