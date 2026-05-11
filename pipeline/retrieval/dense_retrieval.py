@@ -37,7 +37,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
 # 입력
-QUERY_EXPANSION_PATH = BASE_DIR.parent.parent / "output" / "query_expansion" # 이후 쿼리 익스펜션으로 변경해야 함
+QUERY_EXPANSION_PATH = BASE_DIR.parent.parent / "output" / "query_expansion"
 
 LAW_PATH = BASE_DIR.parent.parent / "data" / "law_chunks" / "law_child.csv"
 PREC_PATH = BASE_DIR.parent.parent / "output" / "case_law_with_embeddings.csv"
@@ -208,11 +208,12 @@ def main():
     prec_chunks = {col: load_chunks(PREC_PATH, col, PREC_KEEP_COLS) for col in MODEL_COLS}
     print()
 
-    all_law_results  = []
-    all_prec_results = []
 
     # 파일별로 순회
     for query_file in query_files:
+        all_law_results  = []
+        all_prec_results = []
+        
         print("=" * 60)
         print(f"처리 중: {query_file.name}")
         print("=" * 60)
@@ -283,24 +284,25 @@ def main():
                 "results":     term_prec_results,
             })
 
-    # JSON 저장
-    print(f"\n{'=' * 60}")
-    print("결과 JSON 저장 중...")
-    print("=" * 60)
+        # JSON 저장
+        print(f"\n{'=' * 60}")
+        print("결과 JSON 저장 중...")
+        print("=" * 60)
+        
+        file_stem = query_file.stem
+        law_path = OUTPUT_DIR / f"{file_stem}_dense_law.json"
+        with open(law_path, "w", encoding="utf-8") as f:
+            json.dump(all_law_results, f, ensure_ascii=False, indent=2)
+        print(f"법령: {law_path} ({sum(len(r['results']) for r in all_law_results)}건)")
 
-    law_path = OUTPUT_DIR / "dense_law.json"
-    with open(law_path, "w", encoding="utf-8") as f:
-        json.dump(all_law_results, f, ensure_ascii=False, indent=2)
-    print(f"법령: {law_path} ({sum(len(r['results']) for r in all_law_results)}건)")
+        prec_path = OUTPUT_DIR / f"{file_stem}_dense_lawcase.json"
+        with open(prec_path, "w", encoding="utf-8") as f:
+            json.dump(all_prec_results, f, ensure_ascii=False, indent=2)
+        print(f"판례: {prec_path} ({sum(len(r['results']) for r in all_prec_results)}건)")
 
-    prec_path = OUTPUT_DIR / "dense_caselaw.json"
-    with open(prec_path, "w", encoding="utf-8") as f:
-        json.dump(all_prec_results, f, ensure_ascii=False, indent=2)
-    print(f"판례: {prec_path} ({sum(len(r['results']) for r in all_prec_results)}건)")
-
-    print(f"\n{'=' * 60}")
-    print(f"전체 소요 시간: {time.time()-total_start:.1f}초")
-    print(f"{'=' * 60}")
+        print(f"\n{'=' * 60}")
+        print(f"전체 소요 시간: {time.time()-total_start:.1f}초")
+        print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
