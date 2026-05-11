@@ -9,6 +9,8 @@ data/raw/
 data/lawtalk_qa_filtered/
 data/law_chunks/
 evaluation/results/
+keyword_analysis_output/
+output/
 
 # Python
 __pycache__/
@@ -31,3 +33,10 @@ web/dist/
 
 # GCP
 google-cloud-sdk/
+
+/outputs/qa_item_analysis
+pipeline/retrieval/query_expansion_v1/
+tests/pipeline/query_expansion_v1/
+
+# test
+tests/
