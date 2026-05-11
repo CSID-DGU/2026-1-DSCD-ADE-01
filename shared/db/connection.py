@@ -54,6 +54,7 @@ class DBClient:
         self._db_name = db_name or settings.db_name
         self._connector = Connector()
         self._engine: Engine = self._create_engine()
+        self._closed = False
 
     def _getconn(self) -> Any:
         """Cloud SQL Python Connector를 통해 pg8000 연결을 반환한다."""
@@ -80,6 +81,11 @@ class DBClient:
     def engine(self) -> Engine:
         """SQLAlchemy Engine 인스턴스를 반환한다."""
         return self._engine
+
+    @property
+    def closed(self) -> bool:
+        """엔진과 커넥터가 닫혔는지 반환한다."""
+        return self._closed
 
     def execute(
         self, statement: Any, params: dict[str, Any] | None = None
@@ -174,8 +180,12 @@ class DBClient:
 
     def close(self) -> None:
         """엔진과 커넥터를 정리한다."""
+        if self._closed:
+            return
+
         self._engine.dispose()
         self._connector.close()
+        self._closed = True
 
 
 _db_client: DBClient | None = None
@@ -184,6 +194,6 @@ _db_client: DBClient | None = None
 def get_db_client() -> DBClient:
     """DBClient 싱글턴을 반환한다. 최초 호출 시 1회만 생성."""
     global _db_client  # noqa: PLW0603
-    if _db_client is None:
+    if _db_client is None or _db_client.closed:
         _db_client = DBClient()
     return _db_client

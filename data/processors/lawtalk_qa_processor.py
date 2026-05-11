@@ -316,6 +316,32 @@ def analyze_answer_for_db_with_llm(question_record, answer_item):
     )
 
 
+def parse_prediction_key(key):
+    """Batch prediction key에서 question_id와 답변 순번을 읽는다."""
+    match = re.fullmatch(r"q(\d+)_a(\d+)", str(key))
+    if match is None:
+        raise ValueError(f"invalid prediction key: {key!r}")
+
+    return int(match.group(1)), int(match.group(2))
+
+
+def extract_analysis_from_prediction(prediction):
+    """Batch prediction 한 줄에서 DB 적재용 답변 분석 결과를 읽는다."""
+    try:
+        text = prediction["response"]["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        key = prediction.get("key")
+        raise ValueError(f"prediction has no response text: {key!r}") from exc
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        key = prediction.get("key")
+        raise ValueError(f"prediction response is not valid JSON: {key!r}") from exc
+
+    return LawtalkAnswerAnalysis(**payload)
+
+
 def build_question_row(record):
     """원본 질문 레코드를 questions 테이블 형태로 바꾼다."""
     return {
@@ -352,6 +378,21 @@ def iter_answer_items(records):
 
         for answer_item in record.get("all_answers", []):
             yield answer_id, question_id, record, answer_item
+            answer_id = answer_id + 1
+
+
+def iter_answer_items_with_position(records):
+    """원본 질문 목록에서 답변 ID와 질문 안 답변 순번을 함께 순회한다."""
+    answer_id = 1
+
+    for record in records:
+        question_id = record.get("index")
+
+        for answer_position, answer_item in enumerate(
+            record.get("all_answers", []),
+            start=1,
+        ):
+            yield answer_id, question_id, answer_position, record, answer_item
             answer_id = answer_id + 1
 
 
@@ -396,6 +437,105 @@ def write_json(file_path, records):
     """레코드 목록을 JSON 파일로 저장한다."""
     with open(file_path, "w", encoding="utf-8") as file:
         json.dump(records, file, ensure_ascii=False, indent=2)
+
+
+def read_jsonl(file_path):
+    """JSONL 파일을 한 줄씩 읽어 dict 리스트로 반환한다."""
+    records = []
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line_number, line in enumerate(file, start=1):
+            line = line.strip()
+            if line == "":
+                continue
+
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSONL at line {line_number}") from exc
+
+    return records
+
+
+def prepare_db_ready_records_from_predictions(
+    input_file="data/raw/lawtalk_QA_Context.json",
+    prediction_jsonl=(
+        "data/raw/"
+        "qa-data-processed_prediction-model-2026-05-05T23_38_04.717801Z_predictions.jsonl"
+    ),
+    output_file=None,
+):
+    """원본 QA와 Batch prediction 결과를 합쳐 전체 DB 적재용 JSON을 만든다."""
+    input_path = Path(input_file)
+    prediction_path = Path(prediction_jsonl)
+    output_path = Path(
+        output_file
+        or "data/lawtalk_qa_preprocessed/lawtalk_qa_db_ready_from_predictions.json"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    source_records = read_records_from_file(input_path)
+    question_rows = [build_question_row(record) for record in source_records]
+    prediction_rows = read_jsonl(prediction_path)
+
+    predictions_by_key = {}
+    failed_prediction_count = 0
+    for prediction in prediction_rows:
+        try:
+            question_id, answer_position = parse_prediction_key(prediction.get("key"))
+            predictions_by_key[(question_id, answer_position)] = prediction
+        except ValueError:
+            failed_prediction_count = failed_prediction_count + 1
+
+    answer_rows = []
+    matched_count = 0
+    missing_prediction_count = 0
+
+    for (
+        answer_id,
+        question_id,
+        answer_position,
+        question_record,
+        answer_item,
+    ) in iter_answer_items_with_position(source_records):
+        prediction = predictions_by_key.get((question_id, answer_position))
+        if prediction is None:
+            missing_prediction_count = missing_prediction_count + 1
+            continue
+
+        try:
+            analysis = extract_analysis_from_prediction(prediction)
+        except ValueError:
+            failed_prediction_count = failed_prediction_count + 1
+            continue
+
+        answer_rows.append(
+            build_answer_row(
+                answer_id,
+                question_id,
+                answer_item,
+                analysis,
+            )
+        )
+        matched_count = matched_count + 1
+
+    write_json(
+        output_path,
+        {
+            "questions": question_rows,
+            "answers": answer_rows,
+        },
+    )
+
+    return {
+        "total_questions": len(question_rows),
+        "total_answers": sum(
+            len(record.get("all_answers", [])) for record in source_records
+        ),
+        "prediction_count": len(prediction_rows),
+        "matched_count": matched_count,
+        "missing_prediction_count": missing_prediction_count,
+        "failed_prediction_count": failed_prediction_count,
+    }
 
 
 def load_rule_based_filtered_records(input_dir):

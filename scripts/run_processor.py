@@ -13,6 +13,7 @@ def run_lawtalk_qa(args):
     """로톡 QA 전처리를 실행한다."""
     from data.processors.lawtalk_qa_processor import (
         prepare_db_ready_records,
+        prepare_db_ready_records_from_predictions,
         process_rule_based_filtered_clauses,
         run,
     )
@@ -20,6 +21,7 @@ def run_lawtalk_qa(args):
     debug = False
     extract_clauses = False
     prepare_db = False
+    prepare_db_from_predictions = False
     limit = None
     path_args = []
 
@@ -34,6 +36,11 @@ def run_lawtalk_qa(args):
 
         if arg == "--prepare-db":
             prepare_db = True
+            index = index + 1
+            continue
+
+        if arg == "--prepare-db-from-predictions":
+            prepare_db_from_predictions = True
             index = index + 1
             continue
 
@@ -58,6 +65,51 @@ def run_lawtalk_qa(args):
 
         path_args.append(arg)
         index = index + 1
+
+    if prepare_db_from_predictions:
+        input_file = "data/raw/lawtalk_QA_Context.json"
+        prediction_jsonl = (
+            "data/raw/"
+            "qa-data-processed_prediction-model-2026-05-05T23_38_04.717801Z_predictions.jsonl"
+        )
+        output_file = None
+
+        if len(path_args) >= 1:
+            input_file = path_args[0]
+
+        if len(path_args) >= 2:
+            prediction_jsonl = path_args[1]
+
+        if len(path_args) >= 3:
+            output_file = path_args[2]
+
+        print(f"[lawtalk_qa] 원본 QA 입력: {input_file}")
+        print(f"[lawtalk_qa] 배치 예측 입력: {prediction_jsonl}")
+        print(
+            "[lawtalk_qa] DB 전처리 출력: "
+            + (
+                output_file
+                or (
+                    "data/lawtalk_qa_preprocessed/"
+                    "lawtalk_qa_db_ready_from_predictions.json"
+                )
+            )
+        )
+
+        stats = prepare_db_ready_records_from_predictions(
+            input_file,
+            prediction_jsonl,
+            output_file=output_file,
+        )
+
+        print("\n=== 배치 예측 DB 전처리 결과 요약 ===")
+        print(f"전체 질문: {stats['total_questions']}건")
+        print(f"전체 답변: {stats['total_answers']}건")
+        print(f"배치 예측: {stats['prediction_count']}건")
+        print(f"매칭 성공: {stats['matched_count']}건")
+        print(f"예측 없음: {stats['missing_prediction_count']}건")
+        print(f"예측 파싱 실패: {stats['failed_prediction_count']}건")
+        return
 
     if extract_clauses:
         input_dir = "data/lawtalk_qa_filtered"

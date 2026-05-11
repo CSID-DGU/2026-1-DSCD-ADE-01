@@ -55,8 +55,22 @@ CREATE TABLE IF NOT EXISTS case_law (
     judgment_summary TEXT,
     referenced_law TEXT,
     referenced_case TEXT,
-    case_detail TEXT
+    case_detail TEXT,
+    embedding vector(3072),
+    embedding_kure vector(1024)
 );
+
+ALTER TABLE law_child
+    ADD COLUMN IF NOT EXISTS embed_vertex vector(3072);
+
+ALTER TABLE law_child
+    ADD COLUMN IF NOT EXISTS embed_kure vector(1024);
+
+ALTER TABLE case_law
+    ADD COLUMN IF NOT EXISTS embedding vector(3072);
+
+ALTER TABLE case_law
+    ADD COLUMN IF NOT EXISTS embedding_kure vector(1024);
 
 CREATE INDEX IF NOT EXISTS idx_case_law_case_number
     ON case_law (case_number);
@@ -110,8 +124,11 @@ CREATE TABLE IF NOT EXISTS questions (
     body TEXT,
     tags JSONB,
     written_at DATE,
-    embedding vector(768)
+    embedding vector(3072)
 );
+
+ALTER TABLE questions
+    ALTER COLUMN embedding TYPE vector(3072);
 
 CREATE TABLE IF NOT EXISTS answers (
     id INTEGER PRIMARY KEY,
@@ -124,3 +141,44 @@ CREATE TABLE IF NOT EXISTS answers (
     lawyer_reasoning TEXT,
     action_checklist TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_answers_question_id
+    ON answers (question_id);
+
+CREATE TABLE IF NOT EXISTS answer_referenced_law (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    answer_id INTEGER NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+    clause_key TEXT NOT NULL,
+    law_name TEXT NOT NULL,
+    article_no TEXT NOT NULL,
+    paragraph_no TEXT,
+    parent_id BIGINT REFERENCES law_parent(id),
+    child_id BIGINT REFERENCES law_child(id),
+    CONSTRAINT uq_answer_referenced_law_answer_clause UNIQUE (answer_id, clause_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_law_answer_id
+    ON answer_referenced_law (answer_id);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_law_clause_key
+    ON answer_referenced_law (clause_key);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_law_parent_id
+    ON answer_referenced_law (parent_id);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_law_child_id
+    ON answer_referenced_law (child_id);
+
+CREATE TABLE IF NOT EXISTS answer_referenced_case (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    answer_id INTEGER NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+    referenced_case_number TEXT NOT NULL,
+    CONSTRAINT uq_answer_referenced_case_answer_number
+        UNIQUE (answer_id, referenced_case_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_case_answer_id
+    ON answer_referenced_case (answer_id);
+
+CREATE INDEX IF NOT EXISTS idx_answer_referenced_case_number
+    ON answer_referenced_case (referenced_case_number);
