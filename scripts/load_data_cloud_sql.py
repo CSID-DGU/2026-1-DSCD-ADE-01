@@ -34,7 +34,7 @@ DEFAULT_QA_JSON = (
     / "lawtalk_qa_preprocessed"
     / "lawtalk_qa_db_ready_from_predictions.json"
 )
-COPY_BATCH_SIZE = 200
+COPY_BATCH_SIZE = 1000
 
 EXPECTED_PARENT_COLUMNS = [
     "article_key",
@@ -375,23 +375,36 @@ def copy_rows_in_batches(
     rows: Iterable[dict[str, Any]],
     *,
     batch_size: int = COPY_BATCH_SIZE,
+    total_count: int | None = None,
+    label: str | None = None,
 ) -> int:
     """큰 row iterator를 batch 단위로 COPY한다."""
     copied_count = 0
     batch = []
+    log_label = label or table_name
 
     for row in rows:
         batch.append(row)
         if len(batch) >= batch_size:
             copy_rows(raw_connection, table_name, columns, batch)
             copied_count += len(batch)
+            log_copy_progress(log_label, copied_count, total_count)
             batch = []
 
     if batch:
         copy_rows(raw_connection, table_name, columns, batch)
         copied_count += len(batch)
+        log_copy_progress(log_label, copied_count, total_count)
 
     return copied_count
+
+
+def log_copy_progress(label: str, copied_count: int, total_count: int | None) -> None:
+    if total_count is None:
+        print(f"copied {label} rows: {copied_count:,}", flush=True)
+        return
+
+    print(f"copied {label} rows: {copied_count:,}/{total_count:,}", flush=True)
 
 
 def _find_duplicates(values: Iterable[str]) -> list[str]:
@@ -881,7 +894,14 @@ def load_legal_data(
 
         mapped_parents = [map_parent_row(row) for row in parent_rows]
         print(f"copying law_parent rows: {len(mapped_parents)}", flush=True)
-        copy_rows(raw_connection, "law_parent", PARENT_DB_COLUMNS, mapped_parents)
+        copy_rows_in_batches(
+            raw_connection,
+            "law_parent",
+            PARENT_DB_COLUMNS,
+            mapped_parents,
+            total_count=len(mapped_parents),
+            label="law_parent",
+        )
 
         reference_maps = fetch_reference_maps(raw_connection)
 
@@ -898,32 +918,45 @@ def load_legal_data(
             "law_child",
             CHILD_DB_COLUMNS,
             mapped_children,
+            total_count=child_count,
+            label="law_child",
         )
 
         reference_maps = fetch_reference_maps(raw_connection)
 
         mapped_cases = [map_case_law_row(row) for row in case_rows]
         print(f"copying case_law rows: {len(mapped_cases)}", flush=True)
-        copy_rows(raw_connection, "case_law", CASE_LAW_DB_COLUMNS, mapped_cases)
+        copy_rows_in_batches(
+            raw_connection,
+            "case_law",
+            CASE_LAW_DB_COLUMNS,
+            mapped_cases,
+            total_count=len(mapped_cases),
+            label="case_law",
+        )
 
         referenced_law_rows, referenced_case_rows, unmatched_law_count = (
             build_reference_rows(case_rows, reference_maps)
         )
 
         print(f"copying referenced_law rows: {len(referenced_law_rows)}", flush=True)
-        copy_rows(
+        copy_rows_in_batches(
             raw_connection,
             "referenced_law",
             REFERENCED_LAW_DB_COLUMNS,
             referenced_law_rows,
+            total_count=len(referenced_law_rows),
+            label="referenced_law",
         )
 
         print(f"copying referenced_case rows: {len(referenced_case_rows)}", flush=True)
-        copy_rows(
+        copy_rows_in_batches(
             raw_connection,
             "referenced_case",
             REFERENCED_CASE_DB_COLUMNS,
             referenced_case_rows,
+            total_count=len(referenced_case_rows),
+            label="referenced_case",
         )
 
         raw_connection.commit()
@@ -974,10 +1007,24 @@ def load_qa_data(
             )
 
         print(f"copying questions rows: {len(question_rows)}", flush=True)
-        copy_rows(raw_connection, "questions", QUESTION_DB_COLUMNS, question_rows)
+        copy_rows_in_batches(
+            raw_connection,
+            "questions",
+            QUESTION_DB_COLUMNS,
+            question_rows,
+            total_count=len(question_rows),
+            label="questions",
+        )
 
         print(f"copying answers rows: {len(answer_rows)}", flush=True)
-        copy_rows(raw_connection, "answers", ANSWER_DB_COLUMNS, answer_rows)
+        copy_rows_in_batches(
+            raw_connection,
+            "answers",
+            ANSWER_DB_COLUMNS,
+            answer_rows,
+            total_count=len(answer_rows),
+            label="answers",
+        )
 
         answer_referenced_law_rows = []
         answer_referenced_case_rows = []
@@ -995,11 +1042,13 @@ def load_qa_data(
                 f"{len(answer_referenced_law_rows)}",
                 flush=True,
             )
-            copy_rows(
+            copy_rows_in_batches(
                 raw_connection,
                 "answer_referenced_law",
                 ANSWER_REFERENCED_LAW_DB_COLUMNS,
                 answer_referenced_law_rows,
+                total_count=len(answer_referenced_law_rows),
+                label="answer_referenced_law",
             )
 
             print(
@@ -1007,11 +1056,13 @@ def load_qa_data(
                 f"{len(answer_referenced_case_rows)}",
                 flush=True,
             )
-            copy_rows(
+            copy_rows_in_batches(
                 raw_connection,
                 "answer_referenced_case",
                 ANSWER_REFERENCED_CASE_DB_COLUMNS,
                 answer_referenced_case_rows,
+                total_count=len(answer_referenced_case_rows),
+                label="answer_referenced_case",
             )
 
         raw_connection.commit()
