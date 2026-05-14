@@ -19,42 +19,6 @@ MODEL_NAME = "gemini-2.5-pro"
 # ── 공통 특약 (special_terms 인덱스 0~5) ─────────────────────────
 COMMON_TERMS_COUNT = 6
 
-# ── 출력 JSON 스키마 ──────────────────────────────────────────────
-OUTPUT_SCHEMA = {
-    "contract_checklist": [
-        {
-            "item": None,
-            "description": None,
-            "basis": None
-        }
-    ],
-    "clause_results": [
-        {
-            "clause_id": None,
-            "clause_text": None,
-            "related_laws": [
-                {
-                    "type": None,
-                    "ref": None,
-                    "summary": None
-                }
-            ],
-            "related_clauses": [
-                {
-                    "clause_id": None,
-                    "clause_text": None,
-                    "relation": None
-                }
-            ],
-            "clause_revision": {
-                "target": None,
-                "reason": None,
-                "direction": None
-            }
-        }
-    ]
-}
-
 # ── Pydantic 스키마 ──────────────────────────────────────────────
 class RelatedLaw(BaseModel):
     type: str | None = None
@@ -93,7 +57,7 @@ class RelatedClausesOutput(BaseModel):
 class ChecklistOutput(BaseModel):
     contract_checklist: list[ChecklistItem] | None = None
 
-# ── 프롬프트 (수정 금지) ──────────────────────────────────────────
+# ── 프롬프트 ──────────────────────────────────────────
 SYSTEM_PROMPT = """[역할 및 지시]
 당신은 주택임대차 계약 검토를 도와줄 법률 전문가입니다.
 아래 정보를 바탕으로 임차인이 계약 전 스스로 확인해야 할 사항을 도출하세요.
