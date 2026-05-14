@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
+from pydantic import BaseModel
 
 load_dotenv()
 
@@ -53,6 +54,44 @@ OUTPUT_SCHEMA = {
         }
     ]
 }
+
+# ── Pydantic 스키마 ──────────────────────────────────────────────
+class RelatedLaw(BaseModel):
+    type: str | None = None
+    ref: str | None = None
+    summary: str | None = None
+
+class ClauseRevision(BaseModel):
+    target: str | None = None
+    reason: str | None = None
+    direction: str | None = None
+
+class ClauseResult(BaseModel):
+    clause_id: str | None = None
+    clause_text: str | None = None
+    related_laws: list[RelatedLaw] | None = None
+    clause_revision: ClauseRevision | None = None
+
+class RelatedClause(BaseModel):
+    clause_id: str | None = None
+    clause_text: str | None = None
+    relation: str | None = None
+
+class ChecklistItem(BaseModel):
+    item: str | None = None
+    description: str | None = None
+    basis: str | None = None
+
+class ReportOutput(BaseModel):
+    contract_checklist: list[ChecklistItem] | None = None
+    related_clauses: list[RelatedClause] | None = None
+    clause_results: list[ClauseResult] | None = None
+    
+class RelatedClausesOutput(BaseModel):
+    related_clauses: list[RelatedClause] | None = None
+
+class ChecklistOutput(BaseModel):
+    contract_checklist: list[ChecklistItem] | None = None
 
 # ── 프롬프트 (수정 금지) ──────────────────────────────────────────
 SYSTEM_PROMPT = """[역할 및 지시]
@@ -312,7 +351,6 @@ def build_clause_prompt(
             "clause_id": clause_label,
             "clause_text": None,
             "related_laws": [{"type": None, "ref": None, "summary": None}],
-            "related_clauses": [{"clause_id": None, "clause_text": None, "relation": None}],
             "clause_revision": {"target": None, "reason": None, "direction": None},
         },
         ensure_ascii=False,
@@ -346,6 +384,44 @@ JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 {output_format}
 """
 
+def build_related_clauses_prompt(
+    target_terms: list,
+    clause_results: list,
+) -> str:
+    target_terms_text = "\n".join(
+        [f"특약{i+1}: {t}" for i, t in enumerate(target_terms)]
+    )
+    results_summary = json.dumps(clause_results, ensure_ascii=False, indent=2)
+
+    output_format = json.dumps(
+        {
+            "related_clauses": [
+                {
+                    "clause_id": None,
+                    "clause_text": None,
+                    "relation": None,
+                }
+            ]
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    return f"""
+[타겟 특약 전체]
+{target_terms_text}
+
+[특약별 분석 결과]
+{results_summary}
+
+[출력 지시]
+위 특약들 중 동시에 적용될 때 확인이 필요한 연관 관계가 실제로 존재하는 쌍만 작성하세요.
+연관 관계가 없으면 빈 배열로 반환하세요.
+각 특약 쌍은 한 번만 작성하세요 (A-B가 있으면 B-A는 작성하지 마세요).
+아래 JSON 형식으로만 응답하세요. JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
+
+{output_format}
+"""
 
 def build_checklist_prompt(
     target_terms: list,
@@ -392,97 +468,111 @@ def build_checklist_prompt(
 """
 
 
-def call_llm(prompt: str) -> dict | None:
-    model = GenerativeModel(
-        MODEL_NAME,
-        system_instruction=SYSTEM_PROMPT,
-    )
-    config = GenerationConfig(
-        temperature=0.0,
-        response_mime_type="application/json",
-    )
+def call_llm(prompt: str, schema: type[BaseModel] | None = None) -> dict | None:
+    model = GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
+    config = GenerationConfig(temperature=0.0, response_mime_type="application/json")
     response = model.generate_content(prompt, generation_config=config)
     text = response.text.strip()
-
-    # JSON 파싱 (코드블록 제거 후)
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
-
+    parsed = json.loads(text)
+    if schema:
+        # Pydantic 검증 - 스키마 불일치 시 ValidationError 발생
+        validated = schema.model_validate(parsed)
+        return validated.model_dump()
+    return parsed
 
 def main():
     # ── 파일 로드 ──────────────────────────────────────────────────
     base_dir = Path(__file__).resolve().parent
     project_root = base_dir.parent.parent
+    reranking_dir = project_root / "output" / "reranking"
 
-    contract = load_json(project_root / "output" / "contract.json")
-    law_results = load_json(project_root / "output" / "reranking" / "reranking_law.json")
-    prec_results = load_json(project_root / "output" / "reranking" / "reranking_lawcase.json")
+    # prefix 기준으로 law/caselaw 파일 페어링
+    law_files = list(reranking_dir.glob("*_reranking_law.json"))
 
-    # ── 데이터 분리 ────────────────────────────────────────────────
-    property_info = contract["property_info"]
-    special_terms = contract["special_terms"]
+    for law_file in law_files:
+        prefix = law_file.name.replace("_reranking_law.json", "")
+        caselaw_file = reranking_dir / f"{prefix}_reranking_caselaw.json"
+        contract_file = project_root / "output" / f"{prefix}_contract.json"
 
-    common_terms = special_terms[:COMMON_TERMS_COUNT]   # 인덱스 0~5
-    target_terms = special_terms[COMMON_TERMS_COUNT:]   # 인덱스 6~
+        if not caselaw_file.exists():
+            print(f"[{prefix}] caselaw 파일 없음, 건너뜀")
+            continue
+        if not contract_file.exists():
+            print(f"[{prefix}] contract 파일 없음, 건너뜀")
+            continue
 
-    # ── rrf 결과 인덱싱 ────────────────────────────────────────────
-    rrf_index = build_rrf_index(law_results, prec_results)
+        print(f"\n[{prefix}] 처리 시작")
+        contract = load_json(contract_file)
+        law_results = load_json(law_file)
+        prec_results = load_json(caselaw_file)
 
-    # ── 타겟 특약별 LLM 호출 ───────────────────────────────────────
-    clause_results = []
+        # ── 데이터 분리 ────────────────────────────────────────────────
+        property_info = contract["property_info"]
+        special_terms = contract["special_terms"]
+        common_terms = special_terms[:COMMON_TERMS_COUNT]
+        target_terms = special_terms[COMMON_TERMS_COUNT:]
 
-    for i, term in enumerate(target_terms):
-        rrf_idx = i + 1  # rrf index는 1부터 시작
-        clause_label = f"특약{i+1}"
+        # ── rrf 결과 인덱싱 ────────────────────────────────────────────
+        rrf_index = build_rrf_index(law_results, prec_results)
 
-        laws = rrf_index.get(rrf_idx, {}).get("laws", [])
-        precs = rrf_index.get(rrf_idx, {}).get("precs", [])
+        # ── 타겟 특약별 LLM 호출 ───────────────────────────────────────
+        clause_results = []
 
-        print(f"[{clause_label}] LLM 호출 중...")
+        for i, term in enumerate(target_terms):
+            rrf_idx = i + 1
+            clause_label = f"특약{i+1}"
+            laws = rrf_index.get(rrf_idx, {}).get("laws", [])
+            precs = rrf_index.get(rrf_idx, {}).get("precs", [])
 
-        prompt = build_clause_prompt(
-            target_clause=term,
-            clause_label=clause_label,
-            property_info=property_info,
-            common_terms=common_terms,
-            other_target_terms=target_terms,
-            exclude_idx=i,
-            laws=laws,
-            precs=precs,
+            print(f"  [{clause_label}] LLM 호출 중...")
+            prompt = build_clause_prompt(
+                target_clause=term,
+                clause_label=clause_label,
+                property_info=property_info,
+                common_terms=common_terms,
+                other_target_terms=target_terms,
+                exclude_idx=i,
+                laws=laws,
+                precs=precs,
+            )
+            result = call_llm(prompt, schema=ClauseResult)
+            if result:
+                clause_results.append(result)
+                print(f"  [{clause_label}] 완료")
+            else:
+                print(f"  [{clause_label}] 실패 - null 반환")
+
+        # ── 전체 계약서 체크리스트 생성 ───────────────────────────────
+        print(f"  [전체 체크리스트] LLM 호출 중...")
+        checklist_result = call_llm(
+            build_checklist_prompt(target_terms, clause_results, property_info, common_terms),
+            schema=ChecklistOutput,
         )
+        contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
+        print(f"  [전체 체크리스트] 완료")
 
-        result = call_llm(prompt)
-        if result:
-            clause_results.append(result)
-            print(f"[{clause_label}] 완료")
-        else:
-            print(f"[{clause_label}] 실패 - null 반환")
+        # ── 연관 특약 생성 ────────────────────────────────────────────
+        print(f"  [연관 특약] LLM 호출 중...")
+        related_clauses_result = call_llm(
+            build_related_clauses_prompt(target_terms, clause_results),
+            schema=RelatedClausesOutput,
+        )
+        related_clauses = related_clauses_result.get("related_clauses", []) if related_clauses_result else []
+        print(f"  [연관 특약] 완료")
 
-    # ── 전체 계약서 체크리스트 생성 ───────────────────────────────
-    print("[전체 체크리스트] LLM 호출 중...")
-    checklist_prompt = build_checklist_prompt(
-        target_terms=target_terms,
-        clause_results=clause_results,
-        property_info=property_info,
-        common_terms=common_terms,
-    )
-    checklist_result = call_llm(checklist_prompt)
-    contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
-    print("[전체 체크리스트] 완료")
+        # ── 최종 출력 ──────────────────────────────────────────────────
+        final_output = ReportOutput(
+            contract_checklist=contract_checklist,
+            related_clauses=related_clauses,
+            clause_results=clause_results,
+        )
+        output_path = project_root / "output" / f"{prefix}_report.json"
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(final_output.model_dump_json(indent=2, exclude_none=False))
 
-    # ── 최종 출력 ──────────────────────────────────────────────────
-    final_output = {
-        "contract_checklist": contract_checklist,
-        "clause_results": clause_results,
-    }
-
-    output_path = project_root / "output" / "report.json"
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(final_output, f, ensure_ascii=False, indent=2)
-
-    print(f"\n완료. 결과 저장: {output_path}")
-
+        print(f"  [{prefix}] 완료. 결과 저장: {output_path}")
 
 if __name__ == "__main__":
     main()
