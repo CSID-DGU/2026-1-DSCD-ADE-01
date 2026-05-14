@@ -28,13 +28,8 @@ from pathlib import Path
 from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 
-# 법령 BM25 / Dense
-BM25_LAW_JSON   = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_law.json"
-DENSE_LAW_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_law.json"
-
-# 판례 BM25 / Dense
-BM25_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "bm25_lawcase.json"
-DENSE_PREC_JSON = BASE_DIR.parent.parent / "output" / "retrieval" / "dense_lawcase.json"
+# 입력 경로
+RETRIEVAL_DIR = BASE_DIR.parent.parent / "output" / "retrieval"
 
 # 식별자 필드명
 LAW_ID_FIELD  = "clause_key"
@@ -50,9 +45,39 @@ DENSE_TOP_K = 20
 # 출력 파일
 OUTPUT_DIR = BASE_DIR.parent.parent / "output" / "reranking"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-OUT_LAW_PATH  = OUTPUT_DIR / "reranking_law.json"
-OUT_PREC_PATH = OUTPUT_DIR / "reranking_lawcase.json"
 # ──────────────────────────────────────────────────────────────────────────
+
+def collect_file_groups(retrieval_dir: Path) -> dict:
+    """
+    파일 prefix 기준 그룹핑
+
+    예:
+    contract1_dense_law.json
+    → prefix = contract1
+    """
+
+    groups = {}
+
+    for path in retrieval_dir.glob("*.json"):
+        name = path.name
+
+        if name.endswith("_dense_law.json"):
+            prefix = name.replace("_dense_law.json", "")
+            groups.setdefault(prefix, {})["dense_law"] = path
+
+        elif name.endswith("_dense_lawcase.json"):
+            prefix = name.replace("_dense_lawcase.json", "")
+            groups.setdefault(prefix, {})["dense_case"] = path
+
+        elif name.endswith("_bm25_law.json"):
+            prefix = name.replace("_bm25_law.json", "")
+            groups.setdefault(prefix, {})["bm25_law"] = path
+
+        elif name.endswith("_bm25_lawcase.json"):
+            prefix = name.replace("_bm25_lawcase.json", "")
+            groups.setdefault(prefix, {})["bm25_case"] = path
+
+    return groups
 
 
 def load_bm25(path: Path, id_field: str) -> dict:
@@ -225,23 +250,48 @@ def run(
 
 
 def main():
-    # 법령 RRF
-    run(
-        bm25_path  = BM25_LAW_JSON,
-        dense_path = DENSE_LAW_JSON,
-        id_field   = LAW_ID_FIELD,
-        out_path   = OUT_LAW_PATH,
-        label      = "법령",
-    )
 
-    # 판례 RRF
-    run(
-        bm25_path  = BM25_PREC_JSON,
-        dense_path = DENSE_PREC_JSON,
-        id_field   = PREC_ID_FIELD,
-        out_path   = OUT_PREC_PATH,
-        label      = "판례",
-    )
+    groups = collect_file_groups(RETRIEVAL_DIR)
+
+    print(f"파일 그룹 {len(groups)}개 발견")
+
+    for prefix, files in groups.items():
+
+        print(f"\n{'='*70}")
+        print(f"처리 중: {prefix}")
+        print(f"{'='*70}")
+
+        # 필수 파일 체크
+        required = [
+            "bm25_law",
+            "dense_law",
+            "bm25_case",
+            "dense_case",
+        ]
+
+        missing = [k for k in required if k not in files]
+
+        if missing:
+            print(f"  누락 파일: {missing}")
+            continue
+
+        # 법령
+        run(
+            bm25_path = files["bm25_law"],
+            dense_path = files["dense_law"],
+            id_field = LAW_ID_FIELD,
+            out_path = OUTPUT_DIR / f"{prefix}_reranking_law.json",
+            label = f"{prefix} 법령",
+        )
+
+        # 판례
+        run(
+            bm25_path = files["bm25_case"],
+            dense_path = files["dense_case"],
+            id_field = PREC_ID_FIELD,
+            out_path = OUTPUT_DIR / f"{prefix}_reranking_lawcase.json",
+            label = f"{prefix} 판례",
+        )
 
 
 if __name__ == "__main__":
