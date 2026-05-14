@@ -295,7 +295,7 @@ def main():
             json.dump(all_law_results, f, ensure_ascii=False, indent=2)
         print(f"법령: {law_path} ({sum(len(r['results']) for r in all_law_results)}건)")
 
-        prec_path = OUTPUT_DIR / f"{file_stem}_dense_lawcase.json"
+        prec_path = OUTPUT_DIR / f"{file_stem}_dense_caselaw.json"
         with open(prec_path, "w", encoding="utf-8") as f:
             json.dump(all_prec_results, f, ensure_ascii=False, indent=2)
         print(f"판례: {prec_path} ({sum(len(r['results']) for r in all_prec_results)}건)")
