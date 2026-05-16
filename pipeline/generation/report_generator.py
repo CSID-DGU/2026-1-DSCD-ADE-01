@@ -19,35 +19,31 @@ MODEL_NAME = "gemini-2.5-pro"
 # ── 공통 특약 (special_terms 인덱스 0~5) ─────────────────────────
 COMMON_TERMS_COUNT = 6
 
-# ── 출력 JSON 스키마 ──────────────────────────────────────────────
-OUTPUT_SCHEMA = {
-    "contract_checklist": [
-        {
-            "item": None,
-            "description": None
-        }
-    ],
-    "clause_results": [
-        {
-            "clause_id": None,
-            "clause_text": None,
-            "related_clauses": [
-                {
-                    "clause_id": None,
-                    "clause_text": None,
-                    "relation": None
-                }
-            ],
-            "clause_revision": {
-                "target": None,
-                "reason": None,
-                "direction": None
-            }
-        }
-    ]
-}
+# ── Pydantic 스키마 ──────────────────────────────────────────────
+class RelatedLaw(BaseModel):
+    type: str | None = None
+    ref: str | None = None
+    summary: str | None = None
+class RelatedClause(BaseModel):
+    clause_id: str | None = None
+    clause_text: str | None = None
+    relation: str | None = None
+class ClauseResult(BaseModel):
+    clause_id: str | None = None
+    clause_text: str | None = None
+    related_laws: list[RelatedLaw] | None = None
+    related_clauses: list[RelatedClause] | None = None  # 추가
+class ChecklistItem(BaseModel):
+    item: str | None = None
+    description: str | None = None
+    basis: list[str] | None = None
+class ReportOutput(BaseModel):
+    contract_checklist: list[ChecklistItem] | None = None
+    clause_results: list[ClauseResult] | None = None
+class ChecklistOutput(BaseModel):
+    contract_checklist: list[ChecklistItem] | None = None
 
-# ── 프롬프트 (수정 금지) ──────────────────────────────────────────
+# ── 프롬프트 ──────────────────────────────────────────
 SYSTEM_PROMPT = """[역할 및 지시]
 당신은 주택임대차 계약 검토를 도와줄 법률 전문가입니다.
 아래 정보를 바탕으로 임차인이 계약 전 스스로 확인해야 할 사항을 도출하세요.
@@ -55,15 +51,10 @@ SYSTEM_PROMPT = """[역할 및 지시]
 - 특약 문구의 해석 가능성, 법령과의 관계, 분쟁으로 이어질 수 있는 사실관계를 객관적으로 서술하세요.
 - 명백히 법령에 위반되는 경우에는 해당 법령 조문을 근거로 위반 사실을 서술합니다.
 - "위험", "유리", "불리" 등의 평가적 표현은 사용하지 마세요.
-- contract_checklist는 입력된 모든 특약을 종합 검토한 후, 임차인이 계약 전 확인해야 할 항목을 통합하여 단 한 번 작성하고 확인 항목이 없는 경우 빈 배열로 반환하세요.
-- clause_results는 입력된 특약 각각에 대해 작성하고, 입력에 없는 특약은 임의로 생성하지 마세요.
-- related_clauses는 다른 특약과 동시에 적용될 때 확인이 필요한 사항이 실제로 존재하는 경우에만 작성하고, 없으면 빈 배열로 반환하세요.
-- clause_id는 입력된 특약의 ID를 그대로 사용하세요.
 
 
 [출력 형식 예시]
 아래는 특약 4개가 하나의 계약서에 함께 존재하는 경우의 출력 예시입니다.
-contract_checklist는 4개 특약 전체를 종합하여 단 한 번만 작성하고, clause_results는 특약 각각에 대해 작성합니다.
 실제 입력의 특약 수와 내용에 맞게 작성하세요.
 판단 표현(유리/불리/위험)은 사용하지 마세요.
 
@@ -132,11 +123,7 @@ clause_results:
                    불명확해집니다. 임차인이 수선 비용을 이미 부담한 부분에 대해
                    추가로 원상복구 비용까지 청구될 수 있는지를 두 조항을 함께
                    확인합니다."
-    clause_revision:
-      target: '"모든", "전액"의 범위 불명확'
-      reason: "통상적 사용에 따른 마모(자연 손모)와 임차인 귀책 손상이 구분되지 않아
-               해석 분쟁 가능"
-      direction: "임차인 귀책 손상에 한정하고, 통상 마모 및 대규모 수선은 제외됨을 명시"
+                   
 
   - clause_id: "특약B 해당 ID"
     clause_text: "임차 기간 중 발생하는 모든 수리 및 수선은 임차인이 부담한다."
@@ -147,14 +134,7 @@ clause_results:
                    임차인이 수선한 부분을 퇴거 시 원상복구 대상으로 볼 것인지에 대해
                    두 조항의 적용 범위가 중첩될 수 있습니다. 수선 이후 목적물의
                    상태 변화가 원상복구 의무의 기준이 되는지를 함께 확인합니다."
-    clause_revision:
-      target: '"모든 수리 및 수선"의 범위가 대규모 수선까지 포함하는지 불명확'
-      reason: "건물 주요 구성부분의 대수선·기본 설비 교체 등 대규모 수선과
-               소규모 파손 수선이 구분되지 않아, 임대인 수선의무 면제 범위가
-               불명확한 상태로 해석 분쟁 가능"
-      direction: '임차인 부담 수선의 범위를 "통상 생길 수 있는 소규모 파손"으로
-                 한정하고, 건물 주요 구성부분 대수선·기본 설비 교체 등 대규모
-                 수선은 임대인 부담임을 별도 명시'
+
 
   - clause_id: "특약C 해당 ID"
     clause_text: "계약 갱신 시 임대료 인상률은 당사자 간 협의로 정하며 별도 제한을 두지 않는다."
@@ -165,15 +145,7 @@ clause_results:
                    합의갱신 방식으로만 계약을 연장하게 되어 임대료 인상 제한(5%)
                    규정이 적용되지 않을 수 있습니다. 갱신 방식에 따라 임대료
                    결정 방식이 달라지는지를 두 조항을 함께 확인합니다."
-    clause_revision:
-      target: '"별도 제한을 두지 않는다"는 문구가 법정 증액 상한(5%)을 초과하는
-               인상도 유효하다는 의미로 해석될 여지 존재'
-      reason: "계약갱신요구권 행사 시에는 주택임대차보호법 제7조 제2항에 따라
-               증액 상한이 적용되며, 이를 초과하는 약정 부분은 효력이 없음에도
-               현재 문구는 이를 명시하지 않아 당사자 간 해석 충돌 가능"
-      direction: '"단, 계약갱신요구권 행사에 따른 갱신의 경우 차임 증액은
-                 주택임대차보호법 제7조 제2항에 따른 범위를 초과하지 않는다"는
-                 내용을 병기하여 법정 상한 적용 여부를 명확히 구분'
+
 
   - clause_id: "특약D 해당 ID"
     clause_text: "임차인은 계약 만료 시 계약갱신을 요구하지 않기로 한다."
@@ -184,16 +156,7 @@ clause_results:
                    행사하지 못하게 되면 합의갱신 방식으로만 계약이 연장되어
                    임대료 인상 상한(5%) 규정이 적용되지 않을 수 있습니다.
                    갱신 방식에 따라 임대료 결정 구조가 달라지는지를 두 조항을
-                   함께 확인합니다."
-    clause_revision:
-      target: "임차인의 계약갱신요구권을 사전에 포기하는 내용으로,
-               법이 임차인에게 보장하는 권리를 배제하는 약정에 해당"
-      reason: "주택임대차보호법 제10조(강행규정)에 따라 임차인에게 불리한 약정은
-               효력이 없으므로, 현재 문구는 법적으로 유효하지 않은 내용을
-               계약서에 포함하는 형태로 당사자 간 혼란 초래 가능"
-      direction: '해당 문구를 삭제하거나, "임차인은 임대차기간 만료 6개월 전부터
-                 2개월 전까지의 기간에 법이 정한 바에 따라 계약갱신 여부를
-                 결정한다"는 내용으로 대체하여 법정 절차에 따르도록 명시' """
+                   함께 확인합니다." """
 
 
 def load_json(path: str) -> dict | list:
@@ -273,7 +236,7 @@ def build_clause_prompt(
             "clause_id": clause_label,
             "clause_text": None,
             "related_laws": [{"type": None, "ref": None, "summary": None}],
-            "clause_revision": {"target": None, "reason": None, "direction": None},
+            "related_clauses": [{"clause_id": None, "clause_text": None, "relation": None}]
         },
         ensure_ascii=False,
         indent=2,
@@ -300,47 +263,10 @@ def build_clause_prompt(
 
 [출력 지시]
 위 분석 대상 특약을 검토하여 아래 JSON 형식으로만 응답하세요.
-모든 필드는 해당 내용이 없으면 null을 반환하세요.
-JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
-
-{output_format}
-"""
-
-def build_related_clauses_prompt(
-    target_terms: list,
-    clause_results: list,
-) -> str:
-    target_terms_text = "\n".join(
-        [f"특약{i+1}: {t}" for i, t in enumerate(target_terms)]
-    )
-    results_summary = json.dumps(clause_results, ensure_ascii=False, indent=2)
-
-    output_format = json.dumps(
-        {
-            "related_clauses": [
-                {
-                    "clause_id": None,
-                    "clause_text": None,
-                    "relation": None,
-                }
-            ]
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-    return f"""
-[타겟 특약 전체]
-{target_terms_text}
-
-[특약별 분석 결과]
-{results_summary}
-
-[출력 지시]
-위 특약들 중 동시에 적용될 때 확인이 필요한 연관 관계가 실제로 존재하는 쌍만 작성하세요.
-연관 관계가 없으면 빈 배열로 반환하세요.
-각 특약 쌍은 한 번만 작성하세요 (A-B가 있으면 B-A는 작성하지 마세요).
-아래 JSON 형식으로만 응답하세요. JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
+- related_clauses는 다른 특약과 동시에 적용될 때 확인이 필요한 사항이 실제로 존재하는 경우에만 작성하고, 없으면 빈 배열로 반환하세요.
+- clause_id는 입력된 특약의 ID를 그대로 사용하세요.
+- 모든 필드는 해당 내용이 없으면 null을 반환하세요.
+- JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
 {output_format}
 """
@@ -383,7 +309,8 @@ def build_checklist_prompt(
 
 [출력 지시]
 위 계약서 전체를 바탕으로 임차인이 계약 전 확인해야 할 통합 체크리스트를 작성하세요.
-각 특약을 개별적으로 나열하는 것이 아니라, 계약서 전체 맥락에서 중요한 확인 사항을 도출하세요.
+- 입력된 모든 특약을 종합 검토한 후, 확인 항목을 통합하여 작성하고 확인 항목이 없는 경우 빈 배열로 반환하세요.
+- 각 특약을 개별적으로 나열하는 것이 아니라, 계약서 전체 맥락에서 중요한 확인 사항을 도출하세요.
 아래 JSON 형식으로만 응답하세요. JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
 {output_format}
@@ -475,19 +402,9 @@ def main():
         contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
         print(f"  [전체 체크리스트] 완료")
 
-        # ── 연관 특약 생성 ────────────────────────────────────────────
-        print(f"  [연관 특약] LLM 호출 중...")
-        related_clauses_result = call_llm(
-            build_related_clauses_prompt(target_terms, clause_results),
-            schema=RelatedClausesOutput,
-        )
-        related_clauses = related_clauses_result.get("related_clauses", []) if related_clauses_result else []
-        print(f"  [연관 특약] 완료")
-
         # ── 최종 출력 ──────────────────────────────────────────────────
         final_output = ReportOutput(
             contract_checklist=contract_checklist,
-            related_clauses=related_clauses,
             clause_results=clause_results,
         )
         output_path = project_root / "output" / f"{prefix}_report.json"
