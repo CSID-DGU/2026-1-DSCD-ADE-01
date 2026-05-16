@@ -1,12 +1,9 @@
-"""Legal retrieval evaluation CLI.
-
-Runs the first evaluation contract step: load a validation dataset from an
-absolute JSON path, validate case shape, and write an inspectable report.
-"""
+"""Helpers for legal retrieval evaluation datasets and metric matching."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from dataclasses import dataclass, field
@@ -14,26 +11,52 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from pipeline.reranking.evaluation_reranker import rerank_hybrid_results
-from pipeline.retrieval.evaluation_retrieval import (
-    expand_case_queries,
-    inspect_retrieved_documents,
-    run_hybrid_retrieval,
+from data.processors.validation_dataset_processor import (
+    case_law_has_clause_keyword,
+    coerce_export_id,
+    has_clause_keyword,
+    stable_scalar_sort_key,
 )
+PIPELINE_IMPORT_ERROR: ImportError | None = None
+try:
+    from pipeline.reranking import reranker as project_reranker
+    from pipeline.retrieval.bm25_retrieval import build_query_tokens, tokenize
+    from pipeline.retrieval import dense_retrieval
+    from pipeline.retrieval.evaluation_retrieval import (
+        collect_case_documents,
+        expand_case_queries,
+        inspect_retrieved_documents,
+    )
+    from rank_bm25 import BM25Okapi
+except ImportError as error:
+    PIPELINE_IMPORT_ERROR = error
 
 
 DEFAULT_RECALL_K_VALUES = [1, 3, 5, 10, 20]
 REPORT_SCHEMA_VERSION = "legal_retrieval_eval.v1"
 REQUIRED_CASE_FIELDS = ("case_id", "clauses", "law_references", "precedent_references")
+DEFAULT_INPUT_PATH = PROJECT_ROOT / "evaluation" / "eval_set.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
+SEMANTIC_EMBED_COL = "embed_vertex"
+LAW_SEMANTIC_EMBED_COL = "embed_vertex"
+PRECEDENT_SEMANTIC_EMBED_COL = "embedding"
+LAW_SEMANTIC_KEEP_COLS = ["clause_key", "child_text"]
+PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
 
 
 class DatasetValidationError(ValueError):
     """Raised when an evaluation dataset cannot satisfy the CLI contract."""
+
+
+class PipelineImportError(RuntimeError):
+    """Raised when the real retrieval/reranking pipeline is unavailable."""
 
 
 @dataclass
@@ -57,13 +80,251 @@ class CaseExecutionContext:
         return self.case["case_id"]
 
 
+def assert_real_pipeline_imports_available() -> None:
+    if PIPELINE_IMPORT_ERROR is None:
+        return
+    raise PipelineImportError(
+        "real retrieval/reranking pipeline import failed: "
+        f"{type(PIPELINE_IMPORT_ERROR).__name__}: {PIPELINE_IMPORT_ERROR}\n"
+        "Required actions: restore the project retrieval/reranking modules and "
+        "install their dependencies, then rerun evaluation/legal_retrieval_eval.py."
+    )
+
+
+def parse_text_array(value: Any) -> list[str]:
+    """Parse Cloud SQL text-array exports such as {a,b} into Python strings."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if str(item)]
+    if not isinstance(value, str):
+        return [str(value)]
+
+    text = value.strip()
+    if text in {"", "{}"}:
+        return []
+    if not (text.startswith("{") and text.endswith("}")):
+        return [text]
+
+    inner = text[1:-1]
+    if not inner:
+        return []
+    return [item for item in next(csv.reader([inner])) if item]
+
+
+def append_unique(items: list[str], additions: list[str]) -> None:
+    for item in additions:
+        if item not in items:
+            items.append(item)
+
+
+def has_source_clause_keyword(row: dict[str, Any]) -> bool:
+    """Apply the QA and case-law keyword filters to the correct source fields."""
+    source_type = row.get("source_type")
+    source_text = row.get("source_text")
+    text_fields = source_text if isinstance(source_text, dict) else row
+
+    if source_type == "qa" or "question_body" in text_fields:
+        return has_clause_keyword(text_fields.get("question_body") or "")
+    if source_type == "case_law" or "case_id" in row:
+        return case_law_has_clause_keyword(text_fields)
+    return False
+
+
+def preprocess_qa_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate QA rows by question_id and union answer-level GT."""
+    grouped: dict[Any, dict[str, Any]] = {}
+    for row in rows:
+        question_id = coerce_export_id(row["question_id"])
+        if question_id not in grouped:
+            grouped[question_id] = {
+                "source_type": "qa",
+                "source_id": question_id,
+                "question_id": question_id,
+                "question_title": row.get("question_title") or "",
+                "question_body": row.get("question_body") or "",
+                "gt_laws": [],
+                "gt_cases": [],
+                "answer_ids": [],
+                "n_answers": 0,
+            }
+
+        group = grouped[question_id]
+        question_body = row.get("question_body") or ""
+        if question_body and not has_clause_keyword(group["question_body"]):
+            group["question_body"] = question_body
+        group["answer_ids"].append(coerce_export_id(row["answer_id"]))
+        group["n_answers"] += 1
+        append_unique(group["gt_laws"], parse_text_array(row.get("referenced_laws")))
+        append_unique(group["gt_cases"], parse_text_array(row.get("referenced_cases")))
+
+    candidates: list[dict[str, Any]] = []
+    for group in sorted(
+        grouped.values(),
+        key=lambda item: stable_scalar_sort_key(item["question_id"]),
+    ):
+        if not has_source_clause_keyword(group):
+            continue
+        if not group["gt_laws"] and not group["gt_cases"]:
+            continue
+        group["gt_laws"] = sorted(group["gt_laws"])
+        group["gt_cases"] = sorted(group["gt_cases"])
+        group["answer_ids"] = sorted(group["answer_ids"], key=stable_scalar_sort_key)
+        candidates.append(group)
+    return candidates
+
+
+def build_eval_set_from_stage_rows(
+    qa_stage_rows: list[dict[str, Any]],
+    case_stage_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build eval_set.json records after LLM stage outputs are attached."""
+    records: list[dict[str, Any]] = []
+    for row in sorted(
+        qa_stage_rows,
+        key=lambda item: stable_scalar_sort_key(item.get("question_id", "")),
+    ):
+        if not has_source_clause_keyword({**row, "source_type": "qa"}):
+            continue
+        record = eval_record_from_qa_stage_row(row)
+        if record is not None:
+            records.append(record)
+
+    for row in sorted(
+        case_stage_rows,
+        key=lambda item: stable_scalar_sort_key(item.get("case_id", "")),
+    ):
+        # The combined 특약/조항 search over issue/summary/detail is only for case-law.
+        if not has_source_clause_keyword({**row, "source_type": "case_law"}):
+            continue
+        record = eval_record_from_case_stage_row(row)
+        if record is not None:
+            records.append(record)
+
+    return records
+
+
+def eval_record_from_qa_stage_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    source_id = coerce_export_id(row["question_id"])
+    return build_stage_eval_record(
+        source_type="qa",
+        source_id=source_id,
+        source_text={"question_body": row.get("question_body") or ""},
+        gt_laws=row.get("gt_laws") or [],
+        gt_cases=row.get("gt_cases") or [],
+        meta={
+            "question_title": row.get("question_title") or "",
+            "answer_ids": row.get("answer_ids") or [],
+            "n_answers": row.get("n_answers") or 0,
+        },
+        stage1=row.get("stage1") or {},
+        stage2=row.get("stage2") or [],
+    )
+
+
+def eval_record_from_case_stage_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    source_id = coerce_export_id(row["case_id"])
+    return build_stage_eval_record(
+        source_type="case_law",
+        source_id=source_id,
+        source_text={
+            "issue": row.get("issue") or "",
+            "judgment_summary": row.get("judgment_summary") or "",
+            "case_detail": row.get("case_detail") or "",
+        },
+        gt_laws=row.get("gt_laws") or [],
+        gt_cases=row.get("gt_cases") or [],
+        meta={
+            "case_name": row.get("case_name") or "",
+            "case_number": row.get("case_number") or "",
+            "judgment_date": row.get("judgment_date") or "",
+            "court_name": row.get("court_name") or "",
+        },
+        stage1=row.get("stage1") or {},
+        stage2=row.get("stage2") or [],
+    )
+
+
+def build_stage_eval_record(
+    *,
+    source_type: str,
+    source_id: int | str,
+    source_text: dict[str, str],
+    gt_laws: list[str],
+    gt_cases: list[str],
+    meta: dict[str, Any],
+    stage1: dict[str, Any],
+    stage2: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    clause_type = stage1.get("clause_type")
+    if clause_type == "mention_only" or not stage1.get("is_evaluable"):
+        return None
+    clauses = stage_clauses(clause_type, stage1.get("extracted_clauses") or [], stage2)
+    if not clauses or (not gt_laws and not gt_cases):
+        return None
+    prefix = "case" if source_type == "case_law" else source_type
+    return {
+        "id": f"{prefix}_{source_id}",
+        "source_type": source_type,
+        "source_id": source_id,
+        "source_text": source_text,
+        "clauses": clauses,
+        "gt_laws": sorted(gt_laws),
+        "gt_cases": sorted(gt_cases),
+        "meta": meta,
+    }
+
+
+def stage_clauses(
+    clause_type: str,
+    extracted_clauses: list[str],
+    stage2: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    if clause_type == "explicit_quote":
+        return [
+            {"raw": clause, "normalized": clause, "clause_type": clause_type}
+            for clause in extracted_clauses
+            if clause
+        ]
+    return [
+        {
+            "raw": item["raw"],
+            "normalized": item["normalized"],
+            "clause_type": clause_type,
+        }
+        for item in stage2
+        if item.get("raw") and item.get("normalized")
+    ]
+
+
+def normalize_eval_record_for_pipeline(
+    record: dict[str, Any],
+    case_index: int,
+) -> dict[str, Any]:
+    """Convert eval_set.json shape into the older retrieval-eval case shape."""
+    return {
+        "case_id": record.get("id") or f"eval_{case_index}",
+        "clauses": [clause["normalized"] for clause in record.get("clauses", [])],
+        "law_references": [
+            {"law_child": law_key} for law_key in record.get("gt_laws", [])
+        ],
+        "precedent_references": [
+            {"case_number": case_number} for case_number in record.get("gt_cases", [])
+        ],
+        "source_type": record.get("source_type"),
+        "source_id": record.get("source_id"),
+        "source_text": record.get("source_text", {}),
+        "meta": record.get("meta", {}),
+    }
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run legal QA retrieval evaluation for a JSON array dataset."
     )
     parser.add_argument(
         "--input",
-        required=True,
+        default=str(DEFAULT_INPUT_PATH),
         help="Absolute path to a JSON array evaluation dataset.",
     )
     parser.add_argument(
@@ -96,10 +357,30 @@ def load_dataset(input_path: Path) -> list[dict[str, Any]]:
     if not isinstance(dataset, list):
         raise DatasetValidationError("input JSON must be an array of case objects")
 
-    for index, case in enumerate(dataset):
+    normalized_dataset = [
+        normalize_eval_record_for_pipeline(case, index)
+        if is_eval_set_record(case)
+        else case
+        for index, case in enumerate(dataset)
+    ]
+
+    for index, case in enumerate(normalized_dataset):
         validate_case(case, index)
 
-    return dataset
+    return normalized_dataset
+
+
+def is_eval_set_record(case: Any) -> bool:
+    return isinstance(case, dict) and {
+        "id",
+        "source_type",
+        "source_id",
+        "source_text",
+        "clauses",
+        "gt_laws",
+        "gt_cases",
+        "meta",
+    }.issubset(case)
 
 
 def validate_case(case: Any, index: int) -> None:
@@ -196,7 +477,11 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
         record_stage(context, current_stage, len(context.expanded_queries))
 
         current_stage = "hybrid_retrieval"
-        keyword_results, semantic_results = run_hybrid_retrieval(
+        keyword_results = run_bm25_retrieval(
+            case=context.case,
+            expanded_queries=context.expanded_queries,
+        )
+        semantic_results = run_semantic_retrieval(
             case=context.case,
             expanded_queries=context.expanded_queries,
         )
@@ -210,7 +495,7 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
 
         current_stage = "reranking"
         context.reranked_results.extend(
-            rerank_hybrid_results(
+            run_project_reranking(
                 keyword_results=context.keyword_results,
                 semantic_results=context.semantic_results,
             )
@@ -239,6 +524,313 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
         )
 
 
+def run_bm25_retrieval(
+    *,
+    case: dict[str, Any],
+    expanded_queries: list[dict[str, Any]],
+    top_k: int = 20,
+) -> list[dict[str, Any]]:
+    """Run the project BM25 tokenizer/query path against case-local documents."""
+    documents = collect_case_documents(case)
+    if not documents:
+        return []
+
+    corpus_tokens = [tokenize(document["search_text"]) for document in documents]
+    bm25 = BM25Okapi(corpus_tokens)
+    results: list[dict[str, Any]] = []
+
+    for query in expanded_queries:
+        keywords = query["retrieval_payload"]["bm25_keywords"]
+        query_tokens = build_query_tokens(keywords)
+        scores = bm25.get_scores(query_tokens)
+        top_indexes = sorted(
+            range(len(scores)),
+            key=lambda document_index: scores[document_index],
+            reverse=True,
+        )[:top_k]
+
+        for rank, document_index in enumerate(top_indexes, 1):
+            document = documents[document_index]
+            score = round(float(scores[document_index]), 6)
+            results.append(
+                {
+                    "clause_index": query["clause_index"],
+                    "clause": query["clause"],
+                    "result_id": document["result_id"],
+                    "source_type": document["source_type"],
+                    "score": score,
+                    "keyword_score": score,
+                    "retrieval_method": "bm25",
+                    "rank": rank,
+                    "document_body": document["document_body"],
+                    "document_text": document["document_text"],
+                    "metadata": document["metadata"],
+                    "query_tokens": query_tokens,
+                }
+            )
+
+    return results
+
+
+def run_semantic_retrieval(
+    *,
+    expanded_queries: list[dict[str, Any]],
+    case: dict[str, Any] | None = None,
+    top_k: int = 20,
+    embed_col: str = SEMANTIC_EMBED_COL,
+) -> list[dict[str, Any]]:
+    """Run semantic retrieval through the project's dense retriever module."""
+    case_documents = collect_case_documents(case) if case is not None else []
+    if case_documents:
+        return run_case_local_semantic_retrieval(
+            case=case,
+            expanded_queries=expanded_queries,
+            top_k=top_k,
+        )
+    if case is not None and not is_real_eval_case(case):
+        return []
+
+    law_chunks = dense_retrieval.load_chunks(
+        dense_retrieval.LAW_TABLE,
+        LAW_SEMANTIC_EMBED_COL,
+        LAW_SEMANTIC_KEEP_COLS,
+    )
+    precedent_chunks = dense_retrieval.load_chunks(
+        dense_retrieval.PREC_TABLE,
+        PRECEDENT_SEMANTIC_EMBED_COL,
+        PRECEDENT_SEMANTIC_KEEP_COLS,
+    )
+
+    results: list[dict[str, Any]] = []
+    for query in expanded_queries:
+        dense_query = query["retrieval_payload"]["dense_query"]
+        query_vec = dense_retrieval.embed_query(dense_query, embed_col)
+        results.extend(
+            semantic_results_from_rows(
+                query=query,
+                rows=dense_retrieval.search_similar(
+                    query_vec,
+                    law_chunks,
+                    LAW_SEMANTIC_EMBED_COL,
+                    top_k,
+                ),
+                source_type="law",
+            )
+        )
+        results.extend(
+            semantic_results_from_rows(
+                query=query,
+                rows=dense_retrieval.search_similar(
+                    query_vec,
+                    precedent_chunks,
+                    PRECEDENT_SEMANTIC_EMBED_COL,
+                    top_k,
+                ),
+                source_type="precedent",
+            )
+        )
+    return results
+
+
+def is_real_eval_case(case: dict[str, Any]) -> bool:
+    return {"source_type", "source_id", "source_text", "meta"}.issubset(case)
+
+
+def run_case_local_semantic_retrieval(
+    *,
+    case: dict[str, Any],
+    expanded_queries: list[dict[str, Any]],
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Use project dense ranking on inline documents used by tests and examples."""
+    documents = collect_case_documents(case)
+    texts = [query["retrieval_payload"]["dense_query"] for query in expanded_queries]
+    texts.extend(document["search_text"] for document in documents)
+    vocabulary = sorted({token for text in texts for token in tokenize(text)})
+    if not vocabulary:
+        return []
+
+    token_index = {token: index for index, token in enumerate(vocabulary)}
+    document_frame = pd.DataFrame(
+        [
+            {
+                **document,
+                "_vec": vectorize_text(document["search_text"], token_index),
+            }
+            for document in documents
+        ]
+    )
+
+    results: list[dict[str, Any]] = []
+    dense_retrieval.MIN_SIMILARITY.setdefault("case_local", 0.0)
+    for query in expanded_queries:
+        query_vec = vectorize_text(query["retrieval_payload"]["dense_query"], token_index)
+        results.extend(
+            semantic_results_from_rows(
+                query=query,
+                rows=dense_retrieval.search_similar(
+                    query_vec,
+                    document_frame,
+                    "case_local",
+                    top_k,
+                ),
+                source_type=None,
+            )
+        )
+    return results
+
+
+def vectorize_text(text: str, token_index: dict[str, int]) -> np.ndarray:
+    vector = np.zeros(len(token_index), dtype=np.float32)
+    for token in tokenize(text):
+        if token in token_index:
+            vector[token_index[token]] += 1.0
+    return vector
+
+
+def semantic_results_from_rows(
+    *,
+    query: dict[str, Any],
+    rows: Any,
+    source_type: str | None,
+) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for rank, (_, row) in enumerate(rows.iterrows(), 1):
+        row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+        similarity = round(float(row_dict.get("similarity", 0.0)), 6)
+        result_source_type = source_type or str(row_dict.get("source_type", "document"))
+        document_text = semantic_document_text(row_dict)
+        metadata = {
+            key: value
+            for key, value in row_dict.items()
+            if key
+            not in {
+                "_vec",
+                "similarity",
+                "document_body",
+                "document_text",
+                "search_text",
+            }
+        }
+        # Project precedent retrieval rows expose case_number directly.
+        # Store it in the same nested shape used by the metric matcher.
+        if result_source_type == "precedent" and row_dict.get("case_number"):
+            metadata.setdefault("case_law", {})["case_number"] = row_dict["case_number"]
+        results.append(
+            {
+                "clause_index": query["clause_index"],
+                "clause": query["clause"],
+                "result_id": semantic_result_id(row_dict, result_source_type),
+                "source_type": result_source_type,
+                "score": similarity,
+                "semantic_score": similarity,
+                "similarity": similarity,
+                "retrieval_method": "semantic",
+                "rank": rank,
+                "document_body": row_dict.get("document_body", document_text),
+                "document_text": row_dict.get("document_text", document_text),
+                "metadata": metadata,
+            }
+        )
+    return results
+
+
+def semantic_result_id(row: dict[str, Any], source_type: str) -> str:
+    if source_type == "law" and row.get("clause_key"):
+        return f"law:{row['clause_key']}"
+    if source_type == "precedent":
+        case_number = row.get("case_number")
+        if not case_number and isinstance(row.get("case_law"), dict):
+            case_number = row["case_law"].get("case_number")
+        if case_number:
+            return f"precedent:{case_number}"
+        if row.get("case_id"):
+            return f"precedent:{row['case_id']}"
+    return str(row.get("result_id") or f"{source_type}:{abs(hash(str(row)))}")
+
+
+def run_project_reranking(
+    *,
+    keyword_results: list[dict[str, Any]],
+    semantic_results: list[dict[str, Any]],
+    top_k: int = 20,
+) -> list[dict[str, Any]]:
+    """Use the project RRF reranker with the in-memory evaluation candidates."""
+    result_lookup: dict[tuple[int, str], dict[str, Any]] = {}
+    bm25_map: dict[int, dict[str, Any]] = {}
+    dense_map: dict[str, list[dict[str, Any]]] = {}
+
+    for result in keyword_results:
+        clause_index = int(result["clause_index"])
+        result_id = str(result["result_id"])
+        result_lookup.setdefault((clause_index, result_id), dict(result))
+        bm25_item = bm25_map.setdefault(
+            clause_index,
+            {"special_terms": result["clause"], "rank_map": {}},
+        )
+        bm25_item["rank_map"][result_id] = int(result["rank"])
+
+    for result in semantic_results:
+        clause_index = int(result["clause_index"])
+        result_id = str(result["result_id"])
+        lookup_item = result_lookup.setdefault((clause_index, result_id), dict(result))
+        lookup_item["semantic_score"] = result.get("semantic_score", result.get("score", 0.0))
+        bm25_map.setdefault(
+            clause_index,
+            {"special_terms": result["clause"], "rank_map": {}},
+        )
+        dense_map.setdefault(result["clause"], []).append(
+            {
+                "doc_id": result_id,
+                "score": float(result.get("score", result.get("similarity", 0.0))),
+                "rank": int(result["rank"]),
+                "doc_text": result.get("document_body") or result.get("document_text", ""),
+                "summary": result.get("metadata", {}).get("judgment_summary", ""),
+            }
+        )
+
+    reranked_groups = project_reranker.run_rrf(
+        bm25_map,
+        dense_map,
+        project_reranker.K,
+        top_k,
+    )
+    reranked_results: list[dict[str, Any]] = []
+    for group in reranked_groups:
+        clause_index = int(group["index"])
+        for match in group.get("top_matches", []):
+            result_id = str(match["doc_id"])
+            original = result_lookup.get((clause_index, result_id), {})
+            # Preserve the retrieval fields used by metric matching and reports.
+            item = {
+                "clause_index": clause_index,
+                "clause": group["special_terms"],
+                "result_id": result_id,
+                "source_type": original.get("source_type", "document"),
+                "document_body": original.get("document_body", match.get("doc_text", "")),
+                "document_text": original.get("document_text", match.get("doc_text", "")),
+                "metadata": original.get("metadata", {}),
+                "keyword_rank": match.get("bm25_rank"),
+                "semantic_rank": match.get("dense_rank"),
+                "keyword_score": float(original.get("keyword_score", 0.0)),
+                "semantic_score": float(original.get("semantic_score", 0.0)),
+                "rerank_score": float(match["rrf_score"]),
+                "score": float(match["rrf_score"]),
+                "retrieval_method": "rerank",
+                "rank": int(match["rank"]),
+            }
+            reranked_results.append(item)
+    return reranked_results
+
+
+def semantic_document_text(row: dict[str, Any]) -> str:
+    for field in ("child_text", "judgment_summary", "document_text", "document_body", "text"):
+        value = row.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+    return " ".join(str(value) for value in row.values() if value is not None)
+
+
 def current_stage_output_count(context: CaseExecutionContext, stage: str) -> int:
     if stage == "query_expansion":
         return len(context.expanded_queries)
@@ -259,6 +851,22 @@ def build_case_report(context: CaseExecutionContext) -> dict[str, Any]:
 def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
     case = context.case
     clauses = list(case["clauses"])
+    stage_results = {
+        "bm25": context.keyword_results,
+        "semantic": context.semantic_results,
+        "rerank": context.reranked_results,
+    }
+    stage_recall_at_k = {
+        stage: calculate_stage_recall_at_k(
+            law_references=case["law_references"],
+            precedent_references=case["precedent_references"],
+            results=results,
+        )
+        for stage, results in stage_results.items()
+    }
+    candidate_counts = {
+        stage: count_source_candidates(results) for stage, results in stage_results.items()
+    }
     recall_by_k = calculate_recall_by_k(
         law_references=case["law_references"],
         precedent_references=case["precedent_references"],
@@ -308,6 +916,8 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         "reranked_results": context.reranked_results,
         "inspected_documents": context.inspected_documents,
         "stage_trace": context.stage_trace,
+        "candidate_counts": candidate_counts,
+        "stage_recall_at_k": stage_recall_at_k,
         "recall_by_k": recall_by_k,
         "law_recall_at_k": law_recall_at_k,
         "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
@@ -317,6 +927,8 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
             "case_id": context.case_id,
             "query_expansion": query_expansion,
             "expanded_queries": context.expanded_queries,
+            "candidate_counts": candidate_counts,
+            "stage_recall_at_k": stage_recall_at_k,
             "recall_by_k": recall_by_k,
             "law_recall_at_k": law_recall_at_k,
             "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
@@ -424,6 +1036,8 @@ def build_run_report(
     law_recall_at_k = calculate_run_law_recall_at_k(micro_recall)
     query_recall_by_k = calculate_query_recall_by_k(case_reports)
     query_macro_recall_by_k = calculate_query_macro_recall_by_k(case_reports)
+    stage_recall_at_k = calculate_run_stage_recall_at_k(case_reports)
+    candidate_counts = calculate_run_candidate_counts(case_reports)
 
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -440,6 +1054,8 @@ def build_run_report(
             "law_recall_at_k": law_recall_at_k,
             "query_recall_by_k": query_recall_by_k,
             "query_macro_recall_by_k": query_macro_recall_by_k,
+            "stage_recall_at_k": stage_recall_at_k,
+            "candidate_counts": candidate_counts,
         },
         "input_path": str(input_path),
         "case_id": requested_case_id,
@@ -453,6 +1069,8 @@ def build_run_report(
         "law_recall_at_k": law_recall_at_k,
         "query_recall_by_k": query_recall_by_k,
         "query_macro_recall_by_k": query_macro_recall_by_k,
+        "stage_recall_at_k": stage_recall_at_k,
+        "candidate_counts": candidate_counts,
     }
     return report
 
@@ -552,6 +1170,37 @@ def calculate_law_recall_at_k(
         }
 
     return metrics
+
+
+def calculate_stage_recall_at_k(
+    *,
+    law_references: list[dict[str, Any]],
+    precedent_references: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, dict[str, float | int]]:
+    metrics = calculate_recall_by_k(
+        law_references=law_references,
+        precedent_references=precedent_references,
+        reranked_results=results,
+    )
+    for values in metrics.values():
+        hits = int(values["law_hits"]) + int(values["precedent_hits"])
+        total = int(values["law_total"]) + int(values["precedent_total"])
+        values["hits"] = hits
+        values["total"] = total
+        values["integrated"] = ratio(hits, total)
+    return metrics
+
+
+def count_source_candidates(results: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {"law": 0, "precedent": 0, "total": 0}
+    for result in results:
+        source_type = result.get("source_type")
+        if source_type not in {"law", "precedent"}:
+            continue
+        counts[source_type] += 1
+        counts["total"] += 1
+    return counts
 
 
 def calculate_precedent_hit_flags_by_k(
@@ -809,6 +1458,83 @@ def calculate_run_law_recall_at_k(
     }
 
 
+def calculate_run_stage_recall_at_k(
+    case_reports: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    return {
+        stage: calculate_stage_micro_recall(case_reports, stage)
+        for stage in ("bm25", "semantic", "rerank")
+    }
+
+
+def calculate_stage_micro_recall(
+    case_reports: list[dict[str, Any]],
+    stage: str,
+) -> dict[str, dict[str, float | int]]:
+    metrics: dict[str, dict[str, float | int]] = {}
+    for k in DEFAULT_RECALL_K_VALUES:
+        k_key = str(k)
+        law_hits = sum(
+            case.get("stage_recall_at_k", {})
+            .get(stage, {})
+            .get(k_key, {})
+            .get("law_hits", 0)
+            for case in case_reports
+        )
+        law_total = sum(
+            case.get("stage_recall_at_k", {})
+            .get(stage, {})
+            .get(k_key, {})
+            .get("law_total", 0)
+            for case in case_reports
+        )
+        precedent_hits = sum(
+            case.get("stage_recall_at_k", {})
+            .get(stage, {})
+            .get(k_key, {})
+            .get("precedent_hits", 0)
+            for case in case_reports
+        )
+        precedent_total = sum(
+            case.get("stage_recall_at_k", {})
+            .get(stage, {})
+            .get(k_key, {})
+            .get("precedent_total", 0)
+            for case in case_reports
+        )
+        hits = law_hits + precedent_hits
+        total = law_total + precedent_total
+        metrics[k_key] = {
+            "law": ratio(law_hits, law_total),
+            "law_hits": law_hits,
+            "law_total": law_total,
+            "precedent": ratio(precedent_hits, precedent_total),
+            "precedent_hits": precedent_hits,
+            "precedent_total": precedent_total,
+            "integrated": ratio(hits, total),
+            "hits": hits,
+            "total": total,
+        }
+    return metrics
+
+
+def calculate_run_candidate_counts(
+    case_reports: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    totals = {
+        stage: {"law": 0, "precedent": 0, "total": 0}
+        for stage in ("bm25", "semantic", "rerank")
+    }
+    for case in case_reports:
+        for stage, counts in case.get("candidate_counts", {}).items():
+            if stage not in totals:
+                continue
+            totals[stage]["law"] += counts.get("law", 0)
+            totals[stage]["precedent"] += counts.get("precedent", 0)
+            totals[stage]["total"] += counts.get("total", 0)
+    return totals
+
+
 def calculate_query_recall_by_k(
     case_reports: list[dict[str, Any]],
 ) -> dict[str, dict[str, float | int]]:
@@ -916,32 +1642,29 @@ def count_precedent_hits(
 
 
 def law_match_values(result: dict[str, Any]) -> list[Any]:
-    values = [
-        result.get("clause_key"),
-        result.get("article_key"),
-        result.get("law_name"),
-    ]
+    if result.get("source_type") != "law":
+        return []
+    values = [result.get("clause_key")]
     metadata = result.get("metadata")
     if isinstance(metadata, dict):
-        values.extend(
-            [
-                metadata.get("clause_key"),
-                metadata.get("article_key"),
-                metadata.get("law_name"),
-            ]
-        )
+        values.append(metadata.get("clause_key"))
     return values
 
 
 def precedent_match_values(result: dict[str, Any]) -> list[Any]:
     """Return retrieved precedent identifiers eligible for validation matching."""
+    if result.get("source_type") != "precedent":
+        return []
+    values = [result.get("case_number")]
     metadata = result.get("metadata")
     if not isinstance(metadata, dict):
-        return []
+        return values
+    # Case recall is exact-match only on case_number, whether flat or nested.
+    values.append(metadata.get("case_number"))
     case_law = metadata.get("case_law")
     if isinstance(case_law, dict):
-        return [case_law.get("case_number")]
-    return []
+        values.append(case_law.get("case_number"))
+    return values
 
 
 def normalize_match_value(value: Any) -> str:
@@ -991,6 +1714,7 @@ def run(
     case_id: str | None = None,
     output_path: Path | None = None,
 ) -> Path:
+    assert_real_pipeline_imports_available()
     dataset = load_dataset(input_path)
     cases = select_cases(dataset, case_id)
     report = build_report(input_path=input_path, cases=cases, case_id=case_id)
@@ -1084,6 +1808,51 @@ def format_dataset_recall_summary_console_lines(report: dict[str, Any]) -> list[
     return lines
 
 
+def format_stage_recall_console_lines(report: dict[str, Any]) -> list[str]:
+    metrics = report.get("metrics", {})
+    stage_recall = metrics.get("stage_recall_at_k", {})
+    candidate_counts = metrics.get("candidate_counts", {})
+    lines: list[str] = []
+    for stage in ("bm25", "semantic", "rerank"):
+        counts = candidate_counts.get(stage, {})
+        for k in (3, 5, 10):
+            values = stage_recall.get(stage, {}).get(str(k), {})
+            lines.append(
+                (
+                    f"stage_recall stage={stage} recall@{k} "
+                    f"law={values.get('law', 0.0):.6f} "
+                    f"precedent={values.get('precedent', 0.0):.6f} "
+                    f"integrated={values.get('integrated', 0.0):.6f} "
+                    f"candidates={counts.get('total', 0)} "
+                    f"law_candidates={counts.get('law', 0)} "
+                    f"precedent_candidates={counts.get('precedent', 0)}"
+                )
+            )
+            if stage == "semantic":
+                lines.append(
+                    (
+                        f"semantic_retrieval_recall@{k} "
+                        f"law={values.get('law', 0.0):.6f} "
+                        f"precedent={values.get('precedent', 0.0):.6f} "
+                        f"integrated={values.get('integrated', 0.0):.6f} "
+                        f"hits={values.get('hits', 0)} "
+                        f"total={values.get('total', 0)}"
+                    )
+                )
+            if stage == "rerank":
+                lines.append(
+                    (
+                        f"rerank_recall@{k} "
+                        f"law={values.get('law', 0.0):.6f} "
+                        f"precedent={values.get('precedent', 0.0):.6f} "
+                        f"integrated={values.get('integrated', 0.0):.6f} "
+                        f"hits={values.get('hits', 0)} "
+                        f"total={values.get('total', 0)}"
+                    )
+                )
+    return lines
+
+
 def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
@@ -1095,6 +1864,9 @@ def main() -> int:
             case_id=args.case_id,
             output_path=output_path,
         )
+    except PipelineImportError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     except DatasetValidationError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -1105,6 +1877,8 @@ def main() -> int:
     if report["case_id"] is not None:
         print(f"case_id={report['case_id']}")
     for line in format_dataset_recall_summary_console_lines(report):
+        print(line)
+    for line in format_stage_recall_console_lines(report):
         print(line)
     for line in format_recall_at_k_console_lines(report):
         print(line)

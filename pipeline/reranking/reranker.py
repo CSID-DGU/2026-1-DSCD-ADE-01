@@ -187,7 +187,15 @@ def run_rrf(bm25_map: dict, dense_map: dict, k: int, top_n: int) -> list:
                 "summary"    : summary,
             })
 
-        scored.sort(key=lambda x: x["rrf_score"], reverse=True)
+        # Equal RRF scores are common in small eval sets, so keep output stable.
+        scored.sort(
+            key=lambda x: (
+                -x["rrf_score"],
+                x["bm25_rank"] if x["bm25_rank"] is not None else 1000,
+                x["dense_rank"] if x["dense_rank"] is not None else 1000,
+                x["doc_id"],
+            )
+        )
         top = scored[:top_n]
 
         for rank, item in enumerate(top, 1):
