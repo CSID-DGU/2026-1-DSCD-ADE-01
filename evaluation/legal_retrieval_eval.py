@@ -433,6 +433,12 @@ def parse_args() -> argparse.Namespace:
             "embed_kure uses law_child.embed_kure and case_law.embedding_kure."
         ),
     )
+    parser.add_argument(
+        "--use-llm-qe",
+        action="store_true",
+        default=False,
+        help="Use actual LLM (Gemini) for query expansion instead of the deterministic stub.",
+    )
     return parser.parse_args()
 
 
@@ -1378,6 +1384,7 @@ def build_report(
     expand_fn=None,
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
+    expand_fn=None,
 ) -> dict[str, Any]:
     selected_embed_cols = normalize_semantic_embed_cols(
         semantic_embed_cols,
@@ -2242,6 +2249,7 @@ def run(
     use_llm_qe: bool = False,
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
+    use_llm_qe: bool = False,
 ) -> Path:
     assert_real_pipeline_imports_available()
     expand_fn = expand_case_queries_with_llm if use_llm_qe else expand_case_queries
@@ -2256,6 +2264,7 @@ def run(
         case_id=case_id,
         semantic_embed_cols=semantic_embed_cols,
         semantic_embed_col=semantic_embed_col,
+        expand_fn=expand_fn,
     )
     report_path = save_report(report, output_path=output_path)
     log_progress(f"report_saved path={report_path}")
@@ -2480,6 +2489,7 @@ def main() -> int:
             output_path=output_path,
             use_llm_qe=args.use_llm_qe,
             semantic_embed_cols=args.semantic_embed_cols,
+            use_llm_qe=args.use_llm_qe,
         )
     except PipelineImportError as error:
         print(f"error: {error}", file=sys.stderr)
