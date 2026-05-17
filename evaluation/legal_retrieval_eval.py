@@ -28,7 +28,12 @@ from data.processors.validation_dataset_processor import (
 PIPELINE_IMPORT_ERROR: ImportError | None = None
 try:
     from pipeline.reranking import reranker as project_reranker
-    from pipeline.retrieval.bm25_retrieval import build_query_tokens, tokenize
+    from pipeline.retrieval.bm25_retrieval import (
+        build_query_tokens,
+        load_case_law_from_db,
+        load_law_child_from_db,
+        tokenize,
+    )
     from pipeline.retrieval import dense_retrieval
     from pipeline.retrieval.evaluation_retrieval import (
         collect_case_documents,
@@ -50,6 +55,10 @@ LAW_SEMANTIC_EMBED_COL = "embed_vertex"
 PRECEDENT_SEMANTIC_EMBED_COL = "embedding"
 LAW_SEMANTIC_KEEP_COLS = ["clause_key", "child_text"]
 PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
+
+
+def log_progress(message: str) -> None:
+    print(f"[legal-eval] {message}", file=sys.stderr, flush=True)
 
 
 class DatasetValidationError(ValueError):
@@ -474,10 +483,16 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
     current_stage = "query_expansion"
     try:
         current_stage = "query_expansion"
+        log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
         context.expanded_queries.extend(expand_case_queries(context.case))
         record_stage(context, current_stage, len(context.expanded_queries))
+        log_progress(
+            f"stage_done case_id={context.case_id} stage={current_stage} "
+            f"output_count={len(context.expanded_queries)}"
+        )
 
         current_stage = "hybrid_retrieval"
+        log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
         keyword_results = run_bm25_retrieval(
             case=context.case,
             expanded_queries=context.expanded_queries,
@@ -493,8 +508,14 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
             current_stage,
             len(context.keyword_results) + len(context.semantic_results),
         )
+        log_progress(
+            f"stage_done case_id={context.case_id} stage={current_stage} "
+            f"bm25_results={len(context.keyword_results)} "
+            f"semantic_results={len(context.semantic_results)}"
+        )
 
         current_stage = "reranking"
+        log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
         context.reranked_results.extend(
             run_project_reranking(
                 keyword_results=context.keyword_results,
@@ -502,12 +523,21 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
             )
         )
         record_stage(context, current_stage, len(context.reranked_results))
+        log_progress(
+            f"stage_done case_id={context.case_id} stage={current_stage} "
+            f"output_count={len(context.reranked_results)}"
+        )
 
         current_stage = "document_inspection"
+        log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
         context.inspected_documents.extend(
             inspect_retrieved_documents(context.reranked_results)
         )
         record_stage(context, current_stage, len(context.inspected_documents))
+        log_progress(
+            f"stage_done case_id={context.case_id} stage={current_stage} "
+            f"output_count={len(context.inspected_documents)}"
+        )
         context.status = "completed"
     except Exception as error:  # noqa: BLE001 - report per-case pipeline failures.
         context.status = "failed"
@@ -523,6 +553,10 @@ def run_case_pipeline(context: CaseExecutionContext) -> None:
             status="failed",
             error=context.error,
         )
+        log_progress(
+            f"stage_failed case_id={context.case_id} stage={current_stage} "
+            f"error_type={type(error).__name__} message={str(error)}"
+        )
 
 
 def run_bm25_retrieval(
@@ -531,62 +565,200 @@ def run_bm25_retrieval(
     expanded_queries: list[dict[str, Any]],
     top_k: int = 20,
 ) -> list[dict[str, Any]]:
-    """Run the project BM25 tokenizer/query path against case-local documents."""
+    """Run the project BM25 tokenizer/query path against local or DB documents."""
     documents = collect_case_documents(case)
-    if not documents:
+    if documents:
+        return run_bm25_over_documents(
+            documents=documents,
+            expanded_queries=expanded_queries,
+            top_k=top_k,
+        )
+    if not is_real_eval_case(case):
         return []
 
+    law_documents, law_bm25, precedent_documents, precedent_bm25 = load_bm25_corpus()
+    results: list[dict[str, Any]] = []
+    for query in expanded_queries:
+        query_tokens = build_query_tokens(query["retrieval_payload"]["bm25_keywords"])
+        results.extend(
+            bm25_results_for_documents(
+                query=query,
+                query_tokens=query_tokens,
+                documents=law_documents,
+                bm25=law_bm25,
+                top_k=top_k,
+            )
+        )
+        results.extend(
+            bm25_results_for_documents(
+                query=query,
+                query_tokens=query_tokens,
+                documents=precedent_documents,
+                bm25=precedent_bm25,
+                top_k=top_k,
+            )
+        )
+    return results
+
+
+def run_bm25_over_documents(
+    *,
+    documents: list[dict[str, Any]],
+    expanded_queries: list[dict[str, Any]],
+    top_k: int,
+) -> list[dict[str, Any]]:
     corpus_tokens = [tokenize(document["search_text"]) for document in documents]
     bm25 = BM25Okapi(corpus_tokens)
     results: list[dict[str, Any]] = []
-
     for query in expanded_queries:
-        keywords = query["retrieval_payload"]["bm25_keywords"]
-        query_tokens = build_query_tokens(keywords)
-        scores = bm25.get_scores(query_tokens)
-        top_indexes = sorted(
-            range(len(scores)),
-            key=lambda document_index: scores[document_index],
-            reverse=True,
-        )[:top_k]
-
-        for rank, document_index in enumerate(top_indexes, 1):
-            document = documents[document_index]
-            score = round(float(scores[document_index]), 6)
-            results.append(
-                {
-                    "clause_index": query["clause_index"],
-                    "clause": query["clause"],
-                    "result_id": document["result_id"],
-                    "source_type": document["source_type"],
-                    "score": score,
-                    "keyword_score": score,
-                    "retrieval_method": "bm25",
-                    "rank": rank,
-                    "document_body": document["document_body"],
-                    "document_text": document["document_text"],
-                    "metadata": document["metadata"],
-                    "query_tokens": query_tokens,
-                }
+        query_tokens = build_query_tokens(query["retrieval_payload"]["bm25_keywords"])
+        results.extend(
+            bm25_results_for_documents(
+                query=query,
+                query_tokens=query_tokens,
+                documents=documents,
+                bm25=bm25,
+                top_k=top_k,
             )
+        )
+    return results
 
+
+def bm25_results_for_documents(
+    *,
+    query: dict[str, Any],
+    query_tokens: list[str],
+    documents: list[dict[str, Any]],
+    bm25: BM25Okapi,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    scores = bm25.get_scores(query_tokens)
+    top_indexes = sorted(
+        range(len(scores)),
+        key=lambda document_index: scores[document_index],
+        reverse=True,
+    )[:top_k]
+    results: list[dict[str, Any]] = []
+    for rank, document_index in enumerate(top_indexes, 1):
+        document = documents[document_index]
+        score = round(float(scores[document_index]), 6)
+        results.append(
+            {
+                "clause_index": query["clause_index"],
+                "clause": query["clause"],
+                "result_id": document["result_id"],
+                "source_type": document["source_type"],
+                "score": score,
+                "keyword_score": score,
+                "retrieval_method": "bm25",
+                "rank": rank,
+                "document_body": document["document_body"],
+                "document_text": document["document_text"],
+                "metadata": document["metadata"],
+                "query_tokens": query_tokens,
+            }
+        )
     return results
 
 
 @lru_cache(maxsize=1)
-def load_semantic_chunks() -> tuple[pd.DataFrame, pd.DataFrame]:
-    return (
-        dense_retrieval.load_chunks(
-            dense_retrieval.LAW_TABLE,
-            LAW_SEMANTIC_EMBED_COL,
-            LAW_SEMANTIC_KEEP_COLS,
-        ),
-        dense_retrieval.load_chunks(
-            dense_retrieval.PREC_TABLE,
-            PRECEDENT_SEMANTIC_EMBED_COL,
-            PRECEDENT_SEMANTIC_KEEP_COLS,
-        ),
+def load_bm25_corpus() -> tuple[list[dict[str, Any]], BM25Okapi, list[dict[str, Any]], BM25Okapi]:
+    log_progress("bm25_corpus_load_start")
+    law_documents = bm25_law_documents(load_law_child_from_db())
+    log_progress(f"bm25_corpus_law_loaded rows={len(law_documents)}")
+    precedent_documents = bm25_precedent_documents(load_case_law_from_db())
+    log_progress(f"bm25_corpus_precedent_loaded rows={len(precedent_documents)}")
+    law_bm25 = BM25Okapi([tokenize(document["search_text"]) for document in law_documents])
+    precedent_bm25 = BM25Okapi(
+        [tokenize(document["search_text"]) for document in precedent_documents]
     )
+    log_progress("bm25_corpus_index_ready")
+    return law_documents, law_bm25, precedent_documents, precedent_bm25
+
+
+def bm25_law_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        row_dict = row.to_dict()
+        clause_key = clean_bm25_value(row_dict.get("clause_key"))
+        child_text = clean_bm25_value(row_dict.get("child_text"))
+        metadata = {key: clean_bm25_value(value) for key, value in row_dict.items()}
+        documents.append(
+            {
+                "result_id": f"law:{clause_key}",
+                "source_type": "law",
+                "document_body": child_text,
+                "document_text": child_text,
+                "metadata": metadata,
+                "search_text": " ".join(
+                    [
+                        child_text,
+                        metadata.get("clause_key", ""),
+                        metadata.get("law_name", ""),
+                    ]
+                ),
+            }
+        )
+    return documents
+
+
+def bm25_precedent_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    documents: list[dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        row_dict = row.to_dict()
+        case_number = clean_bm25_value(row_dict.get("case_number"))
+        issue = clean_bm25_value(row_dict.get("issue"))
+        summary = clean_bm25_value(row_dict.get("judgment_summary"))
+        target = clean_bm25_value(row_dict.get("bm25_target")) or f"{issue} {summary}".strip()
+        metadata = {key: clean_bm25_value(value) for key, value in row_dict.items()}
+        metadata.setdefault(
+            "case_law",
+            {
+                "case_number": case_number,
+                "case_name": metadata.get("case_name", ""),
+            },
+        )
+        documents.append(
+            {
+                "result_id": f"precedent:{case_number}",
+                "source_type": "precedent",
+                "document_body": summary or target,
+                "document_text": target,
+                "metadata": metadata,
+                "search_text": " ".join(
+                    [
+                        target,
+                        case_number,
+                        metadata.get("case_name", ""),
+                    ]
+                ),
+            }
+        )
+    return documents
+
+
+def clean_bm25_value(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value)
+
+
+@lru_cache(maxsize=1)
+def load_semantic_chunks() -> tuple[pd.DataFrame, pd.DataFrame]:
+    log_progress("semantic_chunks_load_start")
+    law_chunks = dense_retrieval.load_chunks(
+        dense_retrieval.LAW_TABLE,
+        LAW_SEMANTIC_EMBED_COL,
+        LAW_SEMANTIC_KEEP_COLS,
+    )
+    log_progress(f"semantic_chunks_law_loaded rows={len(law_chunks)}")
+    precedent_chunks = dense_retrieval.load_chunks(
+        dense_retrieval.PREC_TABLE,
+        PRECEDENT_SEMANTIC_EMBED_COL,
+        PRECEDENT_SEMANTIC_KEEP_COLS,
+    )
+    log_progress(f"semantic_chunks_precedent_loaded rows={len(precedent_chunks)}")
+    return law_chunks, precedent_chunks
 
 
 def run_semantic_retrieval(
@@ -1023,7 +1195,19 @@ def build_report(
     case_id: str | None,
 ) -> dict[str, Any]:
     contexts = build_case_contexts(input_path=input_path, cases=cases)
-    case_reports = [build_case_report(context) for context in contexts]
+    log_progress(f"eval_start input_path={input_path} cases={len(contexts)}")
+    case_reports = []
+    for context in contexts:
+        log_progress(
+            f"case_start index={context.case_index + 1}/{len(contexts)} "
+            f"case_id={context.case_id}"
+        )
+        case_report = build_case_report(context)
+        case_reports.append(case_report)
+        log_progress(
+            f"case_done index={context.case_index + 1}/{len(contexts)} "
+            f"case_id={context.case_id} status={case_report['status']}"
+        )
     return build_run_report(
         input_path=input_path,
         requested_case_id=case_id,
@@ -1755,9 +1939,13 @@ def run(
 ) -> Path:
     assert_real_pipeline_imports_available()
     dataset = load_dataset(input_path)
+    log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
     cases = select_cases(dataset, case_id)
+    log_progress(f"dataset_selected cases={len(cases)} case_id={case_id or 'all'}")
     report = build_report(input_path=input_path, cases=cases, case_id=case_id)
-    return save_report(report, output_path=output_path)
+    report_path = save_report(report, output_path=output_path)
+    log_progress(f"report_saved path={report_path}")
+    return report_path
 
 
 def format_core_summary_console_line(report: dict[str, Any]) -> str:
@@ -1767,6 +1955,19 @@ def format_core_summary_console_line(report: dict[str, Any]) -> str:
         f"cases={report.get('case_count', 0)} "
         f"completed={status_counts.get('completed', 0)} "
         f"failed={status_counts.get('failed', 0)}"
+    )
+
+
+def format_evaluation_unit_console_line(report: dict[str, Any]) -> str:
+    aggregation = report.get("case_aggregation", {})
+    return (
+        "evaluation_unit=record "
+        "record_unit=qa_or_case_law "
+        "gt_scope=record_level "
+        "note=clauses_share_record_gt "
+        f"records={aggregation.get('case_count', report.get('case_count', 0))} "
+        f"law_gt={aggregation.get('total_law_references', 0)} "
+        f"precedent_gt={aggregation.get('total_precedent_references', 0)}"
     )
 
 
@@ -1912,6 +2113,7 @@ def main() -> int:
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     print(format_core_summary_console_line(report))
+    print(format_evaluation_unit_console_line(report))
     print(f"cases={report['case_count']}")
     if report["case_id"] is not None:
         print(f"case_id={report['case_id']}")
