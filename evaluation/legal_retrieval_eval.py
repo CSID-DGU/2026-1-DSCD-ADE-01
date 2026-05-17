@@ -1323,16 +1323,16 @@ def law_reference_hit_flags(
     law_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> list[dict[str, str | bool]]:
-    result_keys = {
+    result_keys = [
         normalize_match_value(value)
         for result in results
         for value in law_match_values(result)
         if normalize_match_value(value)
-    }
+    ]
     return [
         {
             "law_child": reference["law_child"],
-            "hit": normalize_match_value(reference["law_child"]) in result_keys,
+            "hit": reference_matches_result(reference["law_child"], result_keys),
         }
         for reference in law_references
     ]
@@ -1343,16 +1343,16 @@ def precedent_hit_flags(
     precedent_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> list[dict[str, str | bool]]:
-    result_case_numbers = {
+    result_case_numbers = [
         normalize_match_value(value)
         for result in results
         for value in precedent_match_values(result)
         if normalize_match_value(value)
-    }
+    ]
     return [
         {
             "case_number": reference["case_number"],
-            "hit": normalize_match_value(reference["case_number"]) in result_case_numbers,
+            "hit": reference_matches_result(reference["case_number"], result_case_numbers),
         }
         for reference in precedent_references
     ]
@@ -1611,16 +1611,16 @@ def count_law_hits(
     law_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> int:
-    result_keys = {
+    result_keys = [
         normalize_match_value(value)
         for result in results
         for value in law_match_values(result)
         if normalize_match_value(value)
-    }
+    ]
     return sum(
         1
         for reference in law_references
-        if normalize_match_value(reference["law_child"]) in result_keys
+        if reference_matches_result(reference["law_child"], result_keys)
     )
 
 
@@ -1628,26 +1628,39 @@ def count_precedent_hits(
     precedent_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> int:
-    result_case_numbers = {
+    result_case_numbers = [
         normalize_match_value(value)
         for result in results
         for value in precedent_match_values(result)
         if normalize_match_value(value)
-    }
+    ]
     return sum(
         1
         for reference in precedent_references
-        if normalize_match_value(reference["case_number"]) in result_case_numbers
+        if reference_matches_result(reference["case_number"], result_case_numbers)
     )
 
 
 def law_match_values(result: dict[str, Any]) -> list[Any]:
     if result.get("source_type") != "law":
         return []
-    values = [result.get("clause_key")]
+    values = [
+        result.get("clause_key"),
+        result.get("law_name"),
+        result.get("article_key"),
+        result.get("result_id"),
+    ]
+    values.extend(combined_law_values(result))
     metadata = result.get("metadata")
     if isinstance(metadata, dict):
-        values.append(metadata.get("clause_key"))
+        values.extend(
+            [
+                metadata.get("clause_key"),
+                metadata.get("law_name"),
+                metadata.get("article_key"),
+            ]
+        )
+        values.extend(combined_law_values(metadata))
     return values
 
 
@@ -1655,22 +1668,40 @@ def precedent_match_values(result: dict[str, Any]) -> list[Any]:
     """Return retrieved precedent identifiers eligible for validation matching."""
     if result.get("source_type") != "precedent":
         return []
-    values = [result.get("case_number")]
+    values = [
+        result.get("case_number"),
+        result.get("case_name"),
+        result.get("result_id"),
+    ]
     metadata = result.get("metadata")
     if not isinstance(metadata, dict):
         return values
-    # Case recall is exact-match only on case_number, whether flat or nested.
-    values.append(metadata.get("case_number"))
+    values.extend([metadata.get("case_number"), metadata.get("case_name")])
     case_law = metadata.get("case_law")
     if isinstance(case_law, dict):
-        values.append(case_law.get("case_number"))
+        values.extend([case_law.get("case_number"), case_law.get("case_name")])
     return values
+
+
+def combined_law_values(item: dict[str, Any]) -> list[str]:
+    law_name = item.get("law_name")
+    article_key = item.get("article_key")
+    if not law_name or not article_key:
+        return []
+    return [f"{law_name}_{article_key}", f"{law_name} {article_key}"]
+
+
+def reference_matches_result(reference: Any, result_values: list[str]) -> bool:
+    normalized_reference = normalize_match_value(reference)
+    if not normalized_reference:
+        return False
+    return any(normalized_reference in result_value for result_value in result_values)
 
 
 def normalize_match_value(value: Any) -> str:
     if value is None:
         return ""
-    return str(value).strip().casefold()
+    return "".join(str(value).strip().casefold().replace("_", " ").split())
 
 
 def ratio(hits: int, total: int) -> float:
