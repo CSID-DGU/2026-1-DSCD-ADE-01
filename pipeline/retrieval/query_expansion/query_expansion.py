@@ -116,10 +116,11 @@ def build_repair_prompt(
 - markdown 코드블록이나 설명문을 붙이지 말라.
 - schema에 없는 필드는 제거하라.
 - 누락된 필수 필드는 채워라.
-- expansion_query는 문자열로 작성하라. 반드시 아래 네 라벨을 순서대로 포함한다:
-  [쟁점 유형], [자유 쟁점], [관련 법률 개념 및 규칙], [유사 분쟁 사실관계]
+- expansion_query는 섹션 라벨 없이 산문 2~3문장으로 작성하라(300자 이내).
+- expansion_query에 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함하라.
 - expansion_query 안에 JSON 키·중첩 JSON 형태를 넣지 말라.
-- keywords는 문자열 배열로 작성하라(최소 3개, 최대 15개).
+- keywords는 문자열 배열로 작성하라(최소 3개, 최대 5개).
+- keywords에 주택임대차보호법, 강행규정 같은 공통 배경 용어는 쓰지 않는다.
 - 출력 필드는 expansion_query, keywords만 허용한다.
 """.strip()
 

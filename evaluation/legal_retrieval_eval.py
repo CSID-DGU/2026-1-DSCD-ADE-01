@@ -38,6 +38,7 @@ try:
     from pipeline.retrieval.evaluation_retrieval import (
         collect_case_documents,
         expand_case_queries,
+        expand_case_queries_with_llm,
         inspect_retrieved_documents,
     )
     from rank_bm25 import BM25Okapi
@@ -419,6 +420,10 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--use-llm-qe",
+        action="store_true",
+        default=False,
+        help="Use actual LLM (Gemini) for query expansion instead of the deterministic stub.",
         "--semantic-embed-cols",
         default=DEFAULT_SEMANTIC_EMBED_COLS_ARG,
         help=(
@@ -566,12 +571,14 @@ def build_case_contexts(
     ]
 
 
-def run_case_pipeline(context: CaseExecutionContext) -> None:
+def run_case_pipeline(context: CaseExecutionContext, expand_fn=None) -> None:
+    if expand_fn is None:
+        expand_fn = expand_case_queries
     current_stage = "query_expansion"
     try:
         current_stage = "query_expansion"
         log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
-        context.expanded_queries.extend(expand_case_queries(context.case))
+        context.expanded_queries.extend(expand_fn(context.case))
         record_stage(context, current_stage, len(context.expanded_queries))
         log_progress(
             f"stage_done case_id={context.case_id} stage={current_stage} "
@@ -1162,8 +1169,8 @@ def current_stage_output_count(context: CaseExecutionContext, stage: str) -> int
     return 0
 
 
-def build_case_report(context: CaseExecutionContext) -> dict[str, Any]:
-    run_case_pipeline(context)
+def build_case_report(context: CaseExecutionContext, expand_fn=None) -> dict[str, Any]:
+    run_case_pipeline(context, expand_fn=expand_fn)
     return case_report_payload(context)
 
 
@@ -1368,6 +1375,7 @@ def build_report(
     input_path: Path,
     cases: list[dict[str, Any]],
     case_id: str | None,
+    expand_fn=None,
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
 ) -> dict[str, Any]:
@@ -1387,7 +1395,7 @@ def build_report(
             f"case_start index={context.case_index + 1}/{len(contexts)} "
             f"case_id={context.case_id}"
         )
-        case_report = build_case_report(context)
+        case_report = build_case_report(context, expand_fn=expand_fn)
         case_reports.append(case_report)
         log_progress(
             f"case_done index={context.case_index + 1}/{len(contexts)} "
@@ -2231,14 +2239,17 @@ def run(
     input_path: Path,
     case_id: str | None = None,
     output_path: Path | None = None,
+    use_llm_qe: bool = False,
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
 ) -> Path:
     assert_real_pipeline_imports_available()
+    expand_fn = expand_case_queries_with_llm if use_llm_qe else expand_case_queries
     dataset = load_dataset(input_path)
     log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_selected cases={len(cases)} case_id={case_id or 'all'}")
+    report = build_report(input_path=input_path, cases=cases, case_id=case_id, expand_fn=expand_fn)
     report = build_report(
         input_path=input_path,
         cases=cases,
@@ -2467,6 +2478,7 @@ def main() -> int:
             input_path=input_path,
             case_id=args.case_id,
             output_path=output_path,
+            use_llm_qe=args.use_llm_qe,
             semantic_embed_cols=args.semantic_embed_cols,
         )
     except PipelineImportError as error:

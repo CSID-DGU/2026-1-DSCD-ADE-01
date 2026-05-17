@@ -17,23 +17,39 @@ def tokenize_for_evaluation(text: str) -> list[str]:
     return [token.lower() for token in TOKEN_PATTERN.findall(text)]
 
 
+def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build query expansion payloads by calling the actual LLM for each clause."""
+    from pipeline.retrieval.query_expansion.query_expansion import expand_clause
+
+    expanded_queries: list[dict[str, Any]] = []
+    for clause_index, clause in enumerate(case["clauses"]):
+        expansion = expand_clause(clause)
+        expanded_queries.append(
+            {
+                "clause_index": clause_index,
+                "clause": clause,
+                "query": clause,
+                "expansion_query": expansion.expansion_query,
+                "keywords": expansion.keywords,
+                "expansion": expansion.model_dump(),
+                "retrieval_payload": build_retrieval_payload(expansion),
+            }
+        )
+    return expanded_queries
+
+
 def expand_case_queries(case: dict[str, Any]) -> list[dict[str, Any]]:
     """Build deterministic query expansion payloads for a case's clauses."""
     expanded_queries: list[dict[str, Any]] = []
     for clause_index, clause in enumerate(case["clauses"]):
         keywords = _keywords_from_clause(clause)
-        clause_summary = _truncate(clause, 180)
+        clause_summary = _truncate(clause, 200)
+        expansion_query = _truncate(
+            f"임대차 계약 특약 조항 '{clause_summary}'에 관한 법률 쟁점과 적용 법령 및 판례를 검색한다.",
+            300,
+        )
         expansion = ClauseQueryExpansion(
-            expansion_query=(
-                "[쟁점 유형]\n"
-                "법률 QA 검색 평가\n\n"
-                "[자유 쟁점]\n"
-                f"{keywords[0]}, {keywords[1]}, {keywords[2]}\n\n"
-                "[관련 법률 개념 및 규칙]\n"
-                f"입력 특약과 관련된 법령 및 판례 근거를 검색한다. 특약 원문: {clause_summary}\n\n"
-                "[유사 분쟁 사실관계]\n"
-                f"계약 조항 '{clause_summary}'와 유사한 법률 분쟁에서 적용된 근거를 찾는다."
-            ),
+            expansion_query=expansion_query,
             keywords=keywords,
         )
         expanded_queries.append(
@@ -125,7 +141,7 @@ def _keywords_from_clause(clause: str) -> list[str]:
     while len(tokens) < 3:
         fallback = f"clause_keyword_{len(tokens) + 1}"
         tokens.append(fallback)
-    return tokens[:15]
+    return tokens[:5]
 
 
 def _truncate(text: str, max_length: int) -> str:
