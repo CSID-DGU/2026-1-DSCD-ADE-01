@@ -8,6 +8,7 @@ import json
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -572,6 +573,22 @@ def run_bm25_retrieval(
     return results
 
 
+@lru_cache(maxsize=1)
+def load_semantic_chunks() -> tuple[pd.DataFrame, pd.DataFrame]:
+    return (
+        dense_retrieval.load_chunks(
+            dense_retrieval.LAW_TABLE,
+            LAW_SEMANTIC_EMBED_COL,
+            LAW_SEMANTIC_KEEP_COLS,
+        ),
+        dense_retrieval.load_chunks(
+            dense_retrieval.PREC_TABLE,
+            PRECEDENT_SEMANTIC_EMBED_COL,
+            PRECEDENT_SEMANTIC_KEEP_COLS,
+        ),
+    )
+
+
 def run_semantic_retrieval(
     *,
     expanded_queries: list[dict[str, Any]],
@@ -590,16 +607,7 @@ def run_semantic_retrieval(
     if case is not None and not is_real_eval_case(case):
         return []
 
-    law_chunks = dense_retrieval.load_chunks(
-        dense_retrieval.LAW_TABLE,
-        LAW_SEMANTIC_EMBED_COL,
-        LAW_SEMANTIC_KEEP_COLS,
-    )
-    precedent_chunks = dense_retrieval.load_chunks(
-        dense_retrieval.PREC_TABLE,
-        PRECEDENT_SEMANTIC_EMBED_COL,
-        PRECEDENT_SEMANTIC_KEEP_COLS,
-    )
+    law_chunks, precedent_chunks = load_semantic_chunks()
 
     results: list[dict[str, Any]] = []
     for query in expanded_queries:
