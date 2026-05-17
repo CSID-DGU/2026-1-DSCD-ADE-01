@@ -38,9 +38,12 @@ try:
     from pipeline.retrieval.evaluation_retrieval import (
         collect_case_documents,
         expand_case_queries,
-        expand_case_queries_with_llm,
         inspect_retrieved_documents,
     )
+    try:
+        from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
+    except ImportError:
+        expand_case_queries_with_llm = None  # type: ignore[assignment]
     from rank_bm25 import BM25Okapi
 except ImportError as error:
     PIPELINE_IMPORT_ERROR = error
@@ -2246,6 +2249,11 @@ def run(
     semantic_embed_col: str | None = None,
 ) -> Path:
     assert_real_pipeline_imports_available()
+    if use_llm_qe and expand_case_queries_with_llm is None:
+        raise PipelineImportError(
+            "--use-llm-qe requires expand_case_queries_with_llm. "
+            "evaluation_retrieval.py를 최신 버전으로 업데이트하세요."
+        )
     expand_fn = expand_case_queries_with_llm if use_llm_qe else expand_case_queries
     dataset = load_dataset(input_path)
     log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
