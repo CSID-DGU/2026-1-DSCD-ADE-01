@@ -134,6 +134,7 @@ class GeminiClient:
         model: str | None = None,
         system_instruction: str | None = None,
         response_schema: type | None = None,
+        temperature: float | None = None,
     ) -> Any:
         """텍스트 또는 파일을 입력받아 생성 결과를 반환한다.
 
@@ -151,6 +152,8 @@ class GeminiClient:
             Pydantic ``BaseModel`` 서브클래스. 전달 시 구조화 JSON 출력을
             요청하고 ``response.parsed`` (Pydantic 인스턴스)를 반환한다.
             None이면 ``response.text`` (str)를 반환한다.
+        temperature:
+            생성 온도. None이면 모델 기본값을 사용한다.
 
         Raises
         ------
@@ -165,6 +168,8 @@ class GeminiClient:
         if response_schema is not None:
             config_kwargs["response_mime_type"] = "application/json"
             config_kwargs["response_schema"] = response_schema
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
 
         config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
