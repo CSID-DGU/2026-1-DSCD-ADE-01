@@ -630,7 +630,12 @@ def clause_key_for(
     article_key = article_key_for(law_name, article_no)
     if paragraph_no:
         return f"{article_key}_제{paragraph_no}항"
-    return f"{article_key}_조문"
+    return article_key
+
+
+def normalize_reference_clause_key(clause_key: str) -> str:
+    """DB reference keys must match law_child/law_parent keys exactly."""
+    return clause_key.removesuffix("_조문")
 
 
 def article_no_from_match(match: re.Match[str]) -> str:
@@ -686,7 +691,9 @@ def parse_referenced_law_text(
 
         article_no = article_no_from_match(match)
         paragraph_no = match.group("paragraph_no")
-        clause_key = clause_key_for(law_name, article_no, paragraph_no)
+        clause_key = normalize_reference_clause_key(
+            clause_key_for(law_name, article_no, paragraph_no)
+        )
         unique_key = (case_id, clause_key)
         if unique_key in seen:
             continue
