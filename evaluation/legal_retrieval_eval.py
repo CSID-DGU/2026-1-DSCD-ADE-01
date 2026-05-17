@@ -51,11 +51,80 @@ REPORT_SCHEMA_VERSION = "legal_retrieval_eval.v1"
 REQUIRED_CASE_FIELDS = ("case_id", "clauses", "law_references", "precedent_references")
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "evaluation" / "eval_set.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
-SEMANTIC_EMBED_COL = "embed_vertex"
-LAW_SEMANTIC_EMBED_COL = "embed_vertex"
-PRECEDENT_SEMANTIC_EMBED_COL = "embedding"
+DEFAULT_SEMANTIC_EMBED_COL = "embed_vertex"
 LAW_SEMANTIC_KEEP_COLS = ["clause_key", "child_text"]
 PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
+SEMANTIC_EMBED_CONFIGS = {
+    "embed_vertex": {
+        "query_embed_col": "embed_vertex",
+        "law_embed_col": "embed_vertex",
+        "precedent_embed_col": "embedding",
+    },
+    "embed_kure": {
+        "query_embed_col": "embed_kure",
+        "law_embed_col": "embed_kure",
+        "precedent_embed_col": "embedding_kure",
+    },
+}
+DEFAULT_SEMANTIC_EMBED_COLS = tuple(SEMANTIC_EMBED_CONFIGS)
+DEFAULT_SEMANTIC_EMBED_COLS_ARG = ",".join(DEFAULT_SEMANTIC_EMBED_COLS)
+SEMANTIC_EMBED_COL = DEFAULT_SEMANTIC_EMBED_COL
+LAW_SEMANTIC_EMBED_COL = SEMANTIC_EMBED_CONFIGS[DEFAULT_SEMANTIC_EMBED_COL][
+    "law_embed_col"
+]
+PRECEDENT_SEMANTIC_EMBED_COL = SEMANTIC_EMBED_CONFIGS[DEFAULT_SEMANTIC_EMBED_COL][
+    "precedent_embed_col"
+]
+
+
+def semantic_embed_config(semantic_embed_col: str) -> dict[str, str]:
+    try:
+        return SEMANTIC_EMBED_CONFIGS[semantic_embed_col]
+    except KeyError as error:
+        choices = ", ".join(sorted(SEMANTIC_EMBED_CONFIGS))
+        raise ValueError(
+            f"unsupported semantic embedding column: {semantic_embed_col}. "
+            f"Expected one of: {choices}"
+        ) from error
+
+
+def normalize_semantic_embed_cols(
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+    *,
+    semantic_embed_col: str | None = None,
+    embed_col: str | None = None,
+) -> tuple[str, ...]:
+    if embed_col is not None:
+        semantic_embed_cols = embed_col
+    elif semantic_embed_col is not None:
+        semantic_embed_cols = semantic_embed_col
+
+    if semantic_embed_cols is None:
+        candidates = list(DEFAULT_SEMANTIC_EMBED_COLS)
+    elif isinstance(semantic_embed_cols, str):
+        candidates = [
+            item.strip()
+            for item in semantic_embed_cols.split(",")
+            if item.strip()
+        ]
+    else:
+        candidates = list(semantic_embed_cols)
+
+    if not candidates:
+        raise ValueError("at least one semantic embedding column must be selected")
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        semantic_embed_config(candidate)
+        if candidate not in normalized:
+            normalized.append(candidate)
+    return tuple(normalized)
+
+
+def semantic_embed_configs(
+    semantic_embed_cols: tuple[str, ...],
+) -> dict[str, dict[str, str]]:
+    return {embed_col: semantic_embed_config(embed_col) for embed_col in semantic_embed_cols}
 
 
 def log_progress(message: str) -> None:
@@ -77,6 +146,7 @@ class CaseExecutionContext:
     case: dict[str, Any]
     case_index: int
     input_path: Path
+    semantic_embed_cols: tuple[str, ...] = DEFAULT_SEMANTIC_EMBED_COLS
     expanded_queries: list[dict[str, Any]] = field(default_factory=list)
     keyword_results: list[dict[str, Any]] = field(default_factory=list)
     semantic_results: list[dict[str, Any]] = field(default_factory=list)
@@ -354,6 +424,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Use actual LLM (Gemini) for query expansion instead of the deterministic stub.",
+        "--semantic-embed-cols",
+        default=DEFAULT_SEMANTIC_EMBED_COLS_ARG,
+        help=(
+            "Comma-separated semantic embedding profiles to evaluate. "
+            "Default evaluates both embed_vertex and embed_kure. "
+            "embed_vertex uses law_child.embed_vertex and case_law.embedding; "
+            "embed_kure uses law_child.embed_kure and case_law.embedding_kure."
+        ),
     )
     return parser.parse_args()
 
@@ -479,9 +557,16 @@ def build_case_contexts(
     *,
     input_path: Path,
     cases: list[dict[str, Any]],
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
 ) -> list[CaseExecutionContext]:
+    normalized_embed_cols = normalize_semantic_embed_cols(semantic_embed_cols)
     return [
-        CaseExecutionContext(case=case, case_index=index, input_path=input_path)
+        CaseExecutionContext(
+            case=case,
+            case_index=index,
+            input_path=input_path,
+            semantic_embed_cols=normalized_embed_cols,
+        )
         for index, case in enumerate(cases)
     ]
 
@@ -509,6 +594,7 @@ def run_case_pipeline(context: CaseExecutionContext, expand_fn=None) -> None:
         semantic_results = run_semantic_retrieval(
             case=context.case,
             expanded_queries=context.expanded_queries,
+            semantic_embed_cols=context.semantic_embed_cols,
         )
         context.keyword_results.extend(keyword_results)
         context.semantic_results.extend(semantic_results)
@@ -752,18 +838,26 @@ def clean_bm25_value(value: Any) -> str:
     return str(value)
 
 
-@lru_cache(maxsize=1)
-def load_semantic_chunks() -> tuple[pd.DataFrame, pd.DataFrame]:
-    log_progress("semantic_chunks_load_start")
+@lru_cache(maxsize=len(SEMANTIC_EMBED_CONFIGS))
+def load_semantic_chunks(
+    semantic_embed_col: str = DEFAULT_SEMANTIC_EMBED_COL,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    config = semantic_embed_config(semantic_embed_col)
+    law_embed_col = config["law_embed_col"]
+    precedent_embed_col = config["precedent_embed_col"]
+    log_progress(
+        f"semantic_chunks_load_start semantic_embed_col={semantic_embed_col} "
+        f"law_col={law_embed_col} precedent_col={precedent_embed_col}"
+    )
     law_chunks = dense_retrieval.load_chunks(
         dense_retrieval.LAW_TABLE,
-        LAW_SEMANTIC_EMBED_COL,
+        law_embed_col,
         LAW_SEMANTIC_KEEP_COLS,
     )
     log_progress(f"semantic_chunks_law_loaded rows={len(law_chunks)}")
     precedent_chunks = dense_retrieval.load_chunks(
         dense_retrieval.PREC_TABLE,
-        PRECEDENT_SEMANTIC_EMBED_COL,
+        precedent_embed_col,
         PRECEDENT_SEMANTIC_KEEP_COLS,
     )
     log_progress(f"semantic_chunks_precedent_loaded rows={len(precedent_chunks)}")
@@ -775,9 +869,17 @@ def run_semantic_retrieval(
     expanded_queries: list[dict[str, Any]],
     case: dict[str, Any] | None = None,
     top_k: int = 20,
-    embed_col: str = SEMANTIC_EMBED_COL,
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+    semantic_embed_col: str | None = None,
+    embed_col: str | None = None,
 ) -> list[dict[str, Any]]:
     """Run semantic retrieval through the project's dense retriever module."""
+    selected_embed_cols = normalize_semantic_embed_cols(
+        semantic_embed_cols,
+        semantic_embed_col=semantic_embed_col,
+        embed_col=embed_col,
+    )
+
     case_documents = collect_case_documents(case) if case is not None else []
     if case_documents:
         return run_case_local_semantic_retrieval(
@@ -788,22 +890,48 @@ def run_semantic_retrieval(
     if case is not None and not is_real_eval_case(case):
         return []
 
-    law_chunks, precedent_chunks = load_semantic_chunks()
+    results: list[dict[str, Any]] = []
+    for selected_embed_col in selected_embed_cols:
+        results.extend(
+            run_semantic_retrieval_for_embed_col(
+                expanded_queries=expanded_queries,
+                top_k=top_k,
+                semantic_embed_col=selected_embed_col,
+            )
+        )
+    return results
+
+
+def run_semantic_retrieval_for_embed_col(
+    *,
+    expanded_queries: list[dict[str, Any]],
+    top_k: int,
+    semantic_embed_col: str,
+) -> list[dict[str, Any]]:
+    """Run semantic retrieval for a single embedding profile."""
+    config = semantic_embed_config(semantic_embed_col)
+    query_embed_col = config["query_embed_col"]
+    law_embed_col = config["law_embed_col"]
+    precedent_embed_col = config["precedent_embed_col"]
+    law_chunks, precedent_chunks = load_semantic_chunks(semantic_embed_col)
 
     results: list[dict[str, Any]] = []
     for query in expanded_queries:
         dense_query = query["retrieval_payload"]["dense_query"]
-        query_vec = dense_retrieval.embed_query(dense_query, embed_col)
+        query_vec = dense_retrieval.embed_query(dense_query, query_embed_col)
         results.extend(
             semantic_results_from_rows(
                 query=query,
                 rows=dense_retrieval.search_similar(
                     query_vec,
                     law_chunks,
-                    LAW_SEMANTIC_EMBED_COL,
+                    law_embed_col,
                     top_k,
                 ),
                 source_type="law",
+                semantic_embed_col=semantic_embed_col,
+                query_embed_col=query_embed_col,
+                document_embed_col=law_embed_col,
             )
         )
         results.extend(
@@ -812,10 +940,13 @@ def run_semantic_retrieval(
                 rows=dense_retrieval.search_similar(
                     query_vec,
                     precedent_chunks,
-                    PRECEDENT_SEMANTIC_EMBED_COL,
+                    precedent_embed_col,
                     top_k,
                 ),
                 source_type="precedent",
+                semantic_embed_col=semantic_embed_col,
+                query_embed_col=query_embed_col,
+                document_embed_col=precedent_embed_col,
             )
         )
     return results
@@ -882,6 +1013,9 @@ def semantic_results_from_rows(
     query: dict[str, Any],
     rows: Any,
     source_type: str | None,
+    semantic_embed_col: str | None = None,
+    query_embed_col: str | None = None,
+    document_embed_col: str | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for rank, (_, row) in enumerate(rows.iterrows(), 1):
@@ -915,6 +1049,9 @@ def semantic_results_from_rows(
                 "semantic_score": similarity,
                 "similarity": similarity,
                 "retrieval_method": "semantic",
+                "semantic_embed_col": semantic_embed_col,
+                "query_semantic_embed_col": query_embed_col,
+                "document_semantic_embed_col": document_embed_col,
                 "rank": rank,
                 "document_body": row_dict.get("document_body", document_text),
                 "document_text": row_dict.get("document_text", document_text),
@@ -1037,9 +1174,27 @@ def build_case_report(context: CaseExecutionContext, expand_fn=None) -> dict[str
     return case_report_payload(context)
 
 
+def group_semantic_results_by_embed_col(
+    results: list[dict[str, Any]],
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    grouped = {
+        embed_col: []
+        for embed_col in normalize_semantic_embed_cols(semantic_embed_cols)
+    }
+    for result in results:
+        embed_col = result.get("semantic_embed_col") or DEFAULT_SEMANTIC_EMBED_COL
+        grouped.setdefault(str(embed_col), []).append(result)
+    return grouped
+
+
 def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
     case = context.case
     clauses = list(case["clauses"])
+    semantic_results_by_embed_col = group_semantic_results_by_embed_col(
+        context.semantic_results,
+        context.semantic_embed_cols,
+    )
     stage_results = {
         "bm25": context.keyword_results,
         "semantic": context.semantic_results,
@@ -1053,8 +1208,20 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         )
         for stage, results in stage_results.items()
     }
+    semantic_stage_recall_at_k = {
+        embed_col: calculate_stage_recall_at_k(
+            law_references=case["law_references"],
+            precedent_references=case["precedent_references"],
+            results=results,
+        )
+        for embed_col, results in semantic_results_by_embed_col.items()
+    }
     candidate_counts = {
         stage: count_source_candidates(results) for stage, results in stage_results.items()
+    }
+    semantic_candidate_counts_by_embed_col = {
+        embed_col: count_source_candidates(results)
+        for embed_col, results in semantic_results_by_embed_col.items()
     }
     recall_by_k = calculate_recall_by_k(
         law_references=case["law_references"],
@@ -1106,7 +1273,9 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         "inspected_documents": context.inspected_documents,
         "stage_trace": context.stage_trace,
         "candidate_counts": candidate_counts,
+        "semantic_candidate_counts_by_embed_col": semantic_candidate_counts_by_embed_col,
         "stage_recall_at_k": stage_recall_at_k,
+        "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
         "recall_by_k": recall_by_k,
         "law_recall_at_k": law_recall_at_k,
         "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
@@ -1117,7 +1286,11 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
             "query_expansion": query_expansion,
             "expanded_queries": context.expanded_queries,
             "candidate_counts": candidate_counts,
+            "semantic_candidate_counts_by_embed_col": (
+                semantic_candidate_counts_by_embed_col
+            ),
             "stage_recall_at_k": stage_recall_at_k,
+            "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
             "recall_by_k": recall_by_k,
             "law_recall_at_k": law_recall_at_k,
             "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
@@ -1203,8 +1376,18 @@ def build_report(
     cases: list[dict[str, Any]],
     case_id: str | None,
     expand_fn=None,
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+    semantic_embed_col: str | None = None,
 ) -> dict[str, Any]:
-    contexts = build_case_contexts(input_path=input_path, cases=cases)
+    selected_embed_cols = normalize_semantic_embed_cols(
+        semantic_embed_cols,
+        semantic_embed_col=semantic_embed_col,
+    )
+    contexts = build_case_contexts(
+        input_path=input_path,
+        cases=cases,
+        semantic_embed_cols=selected_embed_cols,
+    )
     log_progress(f"eval_start input_path={input_path} cases={len(contexts)}")
     case_reports = []
     for context in contexts:
@@ -1222,6 +1405,7 @@ def build_report(
         input_path=input_path,
         requested_case_id=case_id,
         case_reports=case_reports,
+        semantic_embed_cols=selected_embed_cols,
     )
 
 
@@ -1230,7 +1414,14 @@ def build_run_report(
     input_path: Path,
     requested_case_id: str | None,
     case_reports: list[dict[str, Any]],
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+    semantic_embed_col: str | None = None,
 ) -> dict[str, Any]:
+    selected_embed_cols = normalize_semantic_embed_cols(
+        semantic_embed_cols,
+        semantic_embed_col=semantic_embed_col,
+    )
+    selected_embed_configs = semantic_embed_configs(selected_embed_cols)
     status_counts = count_case_statuses(case_reports)
     aggregation = build_case_aggregation(case_reports, status_counts)
     macro_recall = calculate_macro_recall(case_reports)
@@ -1239,7 +1430,17 @@ def build_run_report(
     query_recall_by_k = calculate_query_recall_by_k(case_reports)
     query_macro_recall_by_k = calculate_query_macro_recall_by_k(case_reports)
     stage_recall_at_k = calculate_run_stage_recall_at_k(case_reports)
+    semantic_stage_recall_at_k = calculate_run_semantic_stage_recall_at_k(
+        case_reports,
+        selected_embed_cols,
+    )
     candidate_counts = calculate_run_candidate_counts(case_reports)
+    semantic_candidate_counts_by_embed_col = (
+        calculate_run_semantic_candidate_counts_by_embed_col(
+            case_reports,
+            selected_embed_cols,
+        )
+    )
 
     report = {
         "schema_version": REPORT_SCHEMA_VERSION,
@@ -1247,6 +1448,8 @@ def build_run_report(
             "input_path": str(input_path),
             "requested_case_id": requested_case_id,
             "recall_k_values": DEFAULT_RECALL_K_VALUES,
+            "semantic_embed_cols": list(selected_embed_cols),
+            "semantic_embed_configs": selected_embed_configs,
         },
         "case_aggregation": aggregation,
         "metrics": {
@@ -1257,13 +1460,19 @@ def build_run_report(
             "query_recall_by_k": query_recall_by_k,
             "query_macro_recall_by_k": query_macro_recall_by_k,
             "stage_recall_at_k": stage_recall_at_k,
+            "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
             "candidate_counts": candidate_counts,
+            "semantic_candidate_counts_by_embed_col": (
+                semantic_candidate_counts_by_embed_col
+            ),
         },
         "input_path": str(input_path),
         "case_id": requested_case_id,
         "case_count": len(case_reports),
         "status_counts": status_counts,
         "recall_k_values": DEFAULT_RECALL_K_VALUES,
+        "semantic_embed_cols": list(selected_embed_cols),
+        "semantic_embed_configs": selected_embed_configs,
         "cases": case_reports,
         "macro_recall": macro_recall,
         "micro_recall": micro_recall,
@@ -1272,7 +1481,9 @@ def build_run_report(
         "query_recall_by_k": query_recall_by_k,
         "query_macro_recall_by_k": query_macro_recall_by_k,
         "stage_recall_at_k": stage_recall_at_k,
+        "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
         "candidate_counts": candidate_counts,
+        "semantic_candidate_counts_by_embed_col": semantic_candidate_counts_by_embed_col,
     }
     return report
 
@@ -1669,6 +1880,16 @@ def calculate_run_stage_recall_at_k(
     }
 
 
+def calculate_run_semantic_stage_recall_at_k(
+    case_reports: list[dict[str, Any]],
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict[str, dict[str, float | int]]]:
+    return {
+        embed_col: calculate_semantic_stage_micro_recall(case_reports, embed_col)
+        for embed_col in normalize_semantic_embed_cols(semantic_embed_cols)
+    }
+
+
 def calculate_stage_micro_recall(
     case_reports: list[dict[str, Any]],
     stage: str,
@@ -1720,6 +1941,57 @@ def calculate_stage_micro_recall(
     return metrics
 
 
+def calculate_semantic_stage_micro_recall(
+    case_reports: list[dict[str, Any]],
+    semantic_embed_col: str,
+) -> dict[str, dict[str, float | int]]:
+    metrics: dict[str, dict[str, float | int]] = {}
+    for k in DEFAULT_RECALL_K_VALUES:
+        k_key = str(k)
+        law_hits = sum(
+            case.get("semantic_stage_recall_at_k", {})
+            .get(semantic_embed_col, {})
+            .get(k_key, {})
+            .get("law_hits", 0)
+            for case in case_reports
+        )
+        law_total = sum(
+            case.get("semantic_stage_recall_at_k", {})
+            .get(semantic_embed_col, {})
+            .get(k_key, {})
+            .get("law_total", 0)
+            for case in case_reports
+        )
+        precedent_hits = sum(
+            case.get("semantic_stage_recall_at_k", {})
+            .get(semantic_embed_col, {})
+            .get(k_key, {})
+            .get("precedent_hits", 0)
+            for case in case_reports
+        )
+        precedent_total = sum(
+            case.get("semantic_stage_recall_at_k", {})
+            .get(semantic_embed_col, {})
+            .get(k_key, {})
+            .get("precedent_total", 0)
+            for case in case_reports
+        )
+        hits = law_hits + precedent_hits
+        total = law_total + precedent_total
+        metrics[k_key] = {
+            "law": ratio(law_hits, law_total),
+            "law_hits": law_hits,
+            "law_total": law_total,
+            "precedent": ratio(precedent_hits, precedent_total),
+            "precedent_hits": precedent_hits,
+            "precedent_total": precedent_total,
+            "integrated": ratio(hits, total),
+            "hits": hits,
+            "total": total,
+        }
+    return metrics
+
+
 def calculate_run_candidate_counts(
     case_reports: list[dict[str, Any]],
 ) -> dict[str, dict[str, int]]:
@@ -1734,6 +2006,27 @@ def calculate_run_candidate_counts(
             totals[stage]["law"] += counts.get("law", 0)
             totals[stage]["precedent"] += counts.get("precedent", 0)
             totals[stage]["total"] += counts.get("total", 0)
+    return totals
+
+
+def calculate_run_semantic_candidate_counts_by_embed_col(
+    case_reports: list[dict[str, Any]],
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+) -> dict[str, dict[str, int]]:
+    totals = {
+        embed_col: {"law": 0, "precedent": 0, "total": 0}
+        for embed_col in normalize_semantic_embed_cols(semantic_embed_cols)
+    }
+    for case in case_reports:
+        for embed_col, counts in case.get(
+            "semantic_candidate_counts_by_embed_col",
+            {},
+        ).items():
+            if embed_col not in totals:
+                continue
+            totals[embed_col]["law"] += counts.get("law", 0)
+            totals[embed_col]["precedent"] += counts.get("precedent", 0)
+            totals[embed_col]["total"] += counts.get("total", 0)
     return totals
 
 
@@ -1947,6 +2240,8 @@ def run(
     case_id: str | None = None,
     output_path: Path | None = None,
     use_llm_qe: bool = False,
+    semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
+    semantic_embed_col: str | None = None,
 ) -> Path:
     assert_real_pipeline_imports_available()
     expand_fn = expand_case_queries_with_llm if use_llm_qe else expand_case_queries
@@ -1955,6 +2250,13 @@ def run(
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_selected cases={len(cases)} case_id={case_id or 'all'}")
     report = build_report(input_path=input_path, cases=cases, case_id=case_id, expand_fn=expand_fn)
+    report = build_report(
+        input_path=input_path,
+        cases=cases,
+        case_id=case_id,
+        semantic_embed_cols=semantic_embed_cols,
+        semantic_embed_col=semantic_embed_col,
+    )
     report_path = save_report(report, output_path=output_path)
     log_progress(f"report_saved path={report_path}")
     return report_path
@@ -1980,6 +2282,29 @@ def format_evaluation_unit_console_line(report: dict[str, Any]) -> str:
         f"records={aggregation.get('case_count', report.get('case_count', 0))} "
         f"law_gt={aggregation.get('total_law_references', 0)} "
         f"precedent_gt={aggregation.get('total_precedent_references', 0)}"
+    )
+
+
+def format_semantic_embedding_console_line(report: dict[str, Any]) -> str:
+    embed_cols = report.get("semantic_embed_cols")
+    if not isinstance(embed_cols, list):
+        embed_cols = [report.get("semantic_embed_col", DEFAULT_SEMANTIC_EMBED_COL)]
+    configs = report.get("semantic_embed_configs", {})
+    column_parts = []
+    for embed_col in embed_cols:
+        config = configs.get(embed_col) if isinstance(configs, dict) else None
+        if not isinstance(config, dict):
+            config = semantic_embed_config(embed_col)
+        column_parts.append(
+            (
+                f"{embed_col}:query={config['query_embed_col']},"
+                f"law={config['law_embed_col']},"
+                f"precedent={config['precedent_embed_col']}"
+            )
+        )
+    return (
+        f"semantic_embeddings={','.join(embed_cols)} "
+        f"columns={';'.join(column_parts)}"
     )
 
 
@@ -2064,8 +2389,46 @@ def format_stage_recall_console_lines(report: dict[str, Any]) -> list[str]:
     metrics = report.get("metrics", {})
     stage_recall = metrics.get("stage_recall_at_k", {})
     candidate_counts = metrics.get("candidate_counts", {})
+    semantic_stage_recall = metrics.get("semantic_stage_recall_at_k", {})
+    semantic_candidate_counts = metrics.get("semantic_candidate_counts_by_embed_col", {})
     lines: list[str] = []
     for stage in ("bm25", "semantic", "rerank"):
+        if (
+            stage == "semantic"
+            and isinstance(semantic_stage_recall, dict)
+            and semantic_stage_recall
+        ):
+            embed_cols = report.get("semantic_embed_cols")
+            if not isinstance(embed_cols, list) or not embed_cols:
+                embed_cols = list(semantic_stage_recall)
+            for embed_col in embed_cols:
+                counts = semantic_candidate_counts.get(embed_col, {})
+                for k in (3, 5, 10):
+                    values = semantic_stage_recall.get(embed_col, {}).get(str(k), {})
+                    lines.append(
+                        (
+                            f"stage_recall stage=semantic "
+                            f"semantic_embed_col={embed_col} recall@{k} "
+                            f"law={values.get('law', 0.0):.6f} "
+                            f"precedent={values.get('precedent', 0.0):.6f} "
+                            f"integrated={values.get('integrated', 0.0):.6f} "
+                            f"candidates={counts.get('total', 0)} "
+                            f"law_candidates={counts.get('law', 0)} "
+                            f"precedent_candidates={counts.get('precedent', 0)}"
+                        )
+                    )
+                    lines.append(
+                        (
+                            f"semantic_retrieval_recall@{k} "
+                            f"semantic_embed_col={embed_col} "
+                            f"law={values.get('law', 0.0):.6f} "
+                            f"precedent={values.get('precedent', 0.0):.6f} "
+                            f"integrated={values.get('integrated', 0.0):.6f} "
+                            f"hits={values.get('hits', 0)} "
+                            f"total={values.get('total', 0)}"
+                        )
+                    )
+            continue
         counts = candidate_counts.get(stage, {})
         for k in (3, 5, 10):
             values = stage_recall.get(stage, {}).get(str(k), {})
@@ -2116,6 +2479,7 @@ def main() -> int:
             case_id=args.case_id,
             output_path=output_path,
             use_llm_qe=args.use_llm_qe,
+            semantic_embed_cols=args.semantic_embed_cols,
         )
     except PipelineImportError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -2127,6 +2491,7 @@ def main() -> int:
     report = json.loads(report_path.read_text(encoding="utf-8"))
     print(format_core_summary_console_line(report))
     print(format_evaluation_unit_console_line(report))
+    print(format_semantic_embedding_console_line(report))
     print(f"cases={report['case_count']}")
     if report["case_id"] is not None:
         print(f"case_id={report['case_id']}")
