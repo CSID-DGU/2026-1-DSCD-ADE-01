@@ -38,9 +38,12 @@ try:
     from pipeline.retrieval.evaluation_retrieval import (
         collect_case_documents,
         expand_case_queries,
-        expand_case_queries_with_llm,
         inspect_retrieved_documents,
     )
+    try:
+        from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
+    except ImportError:
+        expand_case_queries_with_llm = None  # type: ignore[assignment]
     from rank_bm25 import BM25Okapi
 except ImportError as error:
     PIPELINE_IMPORT_ERROR = error
@@ -420,10 +423,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--use-llm-qe",
-        action="store_true",
-        default=False,
-        help="Use actual LLM (Gemini) for query expansion instead of the deterministic stub.",
         "--semantic-embed-cols",
         default=DEFAULT_SEMANTIC_EMBED_COLS_ARG,
         help=(
@@ -432,6 +431,12 @@ def parse_args() -> argparse.Namespace:
             "embed_vertex uses law_child.embed_vertex and case_law.embedding; "
             "embed_kure uses law_child.embed_kure and case_law.embedding_kure."
         ),
+    )
+    parser.add_argument(
+        "--use-llm-qe",
+        action="store_true",
+        default=False,
+        help="Use actual LLM (Gemini) for query expansion instead of the deterministic stub.",
     )
     return parser.parse_args()
 
@@ -2244,16 +2249,21 @@ def run(
     semantic_embed_col: str | None = None,
 ) -> Path:
     assert_real_pipeline_imports_available()
+    if use_llm_qe and expand_case_queries_with_llm is None:
+        raise PipelineImportError(
+            "--use-llm-qe requires expand_case_queries_with_llm. "
+            "evaluation_retrieval.py를 최신 버전으로 업데이트하세요."
+        )
     expand_fn = expand_case_queries_with_llm if use_llm_qe else expand_case_queries
     dataset = load_dataset(input_path)
     log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_selected cases={len(cases)} case_id={case_id or 'all'}")
-    report = build_report(input_path=input_path, cases=cases, case_id=case_id, expand_fn=expand_fn)
     report = build_report(
         input_path=input_path,
         cases=cases,
         case_id=case_id,
+        expand_fn=expand_fn,
         semantic_embed_cols=semantic_embed_cols,
         semantic_embed_col=semantic_embed_col,
     )
