@@ -18,7 +18,7 @@ def tokenize_for_evaluation(text: str) -> list[str]:
 
 
 def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build query expansion payloads by calling the actual LLM for each clause."""
+    """Build query expansion payloads for a case's clauses by calling the actual LLM."""
     from pipeline.retrieval.query_expansion.query_expansion import expand_clause
 
     expanded_queries: list[dict[str, Any]] = []
@@ -32,7 +32,7 @@ def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
                 "expansion_query": expansion.expansion_query,
                 "keywords": expansion.keywords,
                 "expansion": expansion.model_dump(),
-                "retrieval_payload": build_retrieval_payload(expansion),
+                "retrieval_payload": build_retrieval_payload(expansion, clause_text=clause),
             }
         )
     return expanded_queries
@@ -60,7 +60,7 @@ def expand_case_queries(case: dict[str, Any]) -> list[dict[str, Any]]:
                 "expansion_query": expansion.expansion_query,
                 "keywords": expansion.keywords,
                 "expansion": expansion.model_dump(),
-                "retrieval_payload": build_retrieval_payload(expansion),
+                "retrieval_payload": build_retrieval_payload(expansion, clause_text=clause),
             }
         )
     return expanded_queries

@@ -130,11 +130,12 @@ def expand_clause(
     *,
     client: GeminiClient | None = None,
     max_retries: int = 1,
+    user_prompt: str | None = None,
 ) -> ClauseQueryExpansion:
     """특약 문장을 ClauseQueryExpansion으로 변환한다."""
     llm = client or gemini_client
 
-    user_prompt = build_user_prompt(clause_text)
+    user_prompt = user_prompt or build_user_prompt(clause_text)
     last_error: Exception | None = None
     last_output: Any = None
 
