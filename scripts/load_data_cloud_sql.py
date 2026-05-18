@@ -121,8 +121,8 @@ CASE_LAW_DB_COLUMNS = [
     "referenced_law",
     "referenced_case",
     "case_detail",
-    "embedding",
-    "embedding_kure",
+    "embed_vertex",
+    "embed_kure",
 ]
 
 REFERENCED_LAW_DB_COLUMNS = [
@@ -551,8 +551,8 @@ def map_case_law_row(row: dict[str, str]) -> dict[str, Any]:
         "referenced_law": to_nullable_text(row["referenced_law"]),
         "referenced_case": to_nullable_text(row["referenced_case"]),
         "case_detail": to_nullable_text(row["case_detail"]),
-        "embedding": parse_pgvector(row["embed_vertex"]),
-        "embedding_kure": parse_pgvector(
+        "embed_vertex": parse_pgvector(row["embed_vertex"]),
+        "embed_kure": parse_pgvector(
             row["embed_kure"],
             expected_dimensions=1024,
         ),
