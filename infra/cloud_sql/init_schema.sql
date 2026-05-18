@@ -56,8 +56,8 @@ CREATE TABLE IF NOT EXISTS case_law (
     referenced_law TEXT,
     referenced_case TEXT,
     case_detail TEXT,
-    embedding vector(3072),
-    embedding_kure vector(1024)
+    embed_vertex vector(3072),
+    embed_kure vector(1024)
 );
 
 ALTER TABLE law_child
@@ -67,10 +67,10 @@ ALTER TABLE law_child
     ADD COLUMN IF NOT EXISTS embed_kure vector(1024);
 
 ALTER TABLE case_law
-    ADD COLUMN IF NOT EXISTS embedding vector(3072);
+    ADD COLUMN IF NOT EXISTS embed_vertex vector(3072);
 
 ALTER TABLE case_law
-    ADD COLUMN IF NOT EXISTS embedding_kure vector(1024);
+    ADD COLUMN IF NOT EXISTS embed_kure vector(1024);
 
 CREATE INDEX IF NOT EXISTS idx_case_law_case_number
     ON case_law (case_number);

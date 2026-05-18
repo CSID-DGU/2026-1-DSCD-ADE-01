@@ -61,12 +61,12 @@ SEMANTIC_EMBED_CONFIGS = {
     "embed_vertex": {
         "query_embed_col": "embed_vertex",
         "law_embed_col": "embed_vertex",
-        "precedent_embed_col": "embedding",
+        "precedent_embed_col": "embed_vertex",
     },
     "embed_kure": {
         "query_embed_col": "embed_kure",
         "law_embed_col": "embed_kure",
-        "precedent_embed_col": "embedding_kure",
+        "precedent_embed_col": "embed_kure",
     },
 }
 DEFAULT_SEMANTIC_EMBED_COLS = tuple(SEMANTIC_EMBED_CONFIGS)
@@ -428,8 +428,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated semantic embedding profiles to evaluate. "
             "Default evaluates both embed_vertex and embed_kure. "
-            "embed_vertex uses law_child.embed_vertex and case_law.embedding; "
-            "embed_kure uses law_child.embed_kure and case_law.embedding_kure."
+            "embed_vertex uses law_child.embed_vertex and case_law.embed_vertex; "
+            "embed_kure uses law_child.embed_kure and case_law.embed_kure."
         ),
     )
     parser.add_argument(
