@@ -35,9 +35,9 @@ class ClauseQueryExpansion(BaseModel):
     keywords: List[str] = Field(
         ...,
         min_length=3,
-        max_length=5,
+        max_length=7,
         description=(
-            "BM25 검색에 사용할 이 특약에 특화된 구체 명사구 3~5개. "
+            "BM25 검색에 사용할 이 특약에 특화된 구체 명사구 3~7개. "
             "다른 특약과 구별되는 이 특약만의 구체적 상황을 반영한다."
         ),
     )
