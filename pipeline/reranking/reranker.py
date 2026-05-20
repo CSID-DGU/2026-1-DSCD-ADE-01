@@ -45,6 +45,10 @@ DENSE_TOP_K = 20
 # 출력 파일
 OUTPUT_DIR = BASE_DIR.parent.parent / "output" / "reranking"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# ─── 하이브리드 스코어 설정 ───────────────────────────────────────────────
+ALPHA = 0.5  # BM25 가중치 (1-ALPHA = Dense 가중치)
+
 # ──────────────────────────────────────────────────────────────────────────
 
 def collect_file_groups(retrieval_dir: Path) -> dict:
@@ -65,16 +69,16 @@ def collect_file_groups(retrieval_dir: Path) -> dict:
             prefix = name.replace("_dense_law.json", "")
             groups.setdefault(prefix, {})["dense_law"] = path
 
-        elif name.endswith("_dense_lawcase.json"):
-            prefix = name.replace("_dense_lawcase.json", "")
+        elif name.endswith("_dense_caselaw.json"):
+            prefix = name.replace("_dense_caselaw.json", "")
             groups.setdefault(prefix, {})["dense_case"] = path
 
         elif name.endswith("_bm25_law.json"):
             prefix = name.replace("_bm25_law.json", "")
             groups.setdefault(prefix, {})["bm25_law"] = path
 
-        elif name.endswith("_bm25_lawcase.json"):
-            prefix = name.replace("_bm25_lawcase.json", "")
+        elif name.endswith("_bm25_caselaw.json"):
+            prefix = name.replace("_bm25_caselaw.json", "")
             groups.setdefault(prefix, {})["bm25_case"] = path
 
     return groups
@@ -187,15 +191,7 @@ def run_rrf(bm25_map: dict, dense_map: dict, k: int, top_n: int) -> list:
                 "summary"    : summary,
             })
 
-        # Equal RRF scores are common in small eval sets, so keep output stable.
-        scored.sort(
-            key=lambda x: (
-                -x["rrf_score"],
-                x["bm25_rank"] if x["bm25_rank"] is not None else 1000,
-                x["dense_rank"] if x["dense_rank"] is not None else 1000,
-                x["doc_id"],
-            )
-        )
+        scored.sort(key=lambda x: x["rrf_score"], reverse=True)
         top = scored[:top_n]
 
         for rank, item in enumerate(top, 1):
@@ -209,6 +205,101 @@ def run_rrf(bm25_map: dict, dense_map: dict, k: int, top_n: int) -> list:
 
     return results
 
+def min_max_normalize(scores: list[float]) -> list[float]:
+    """min-max 정규화."""
+    if not scores:
+        return scores
+    min_s = min(scores)
+    max_s = max(scores)
+    if max_s == min_s:
+        return [1.0] * len(scores)
+    return [(s - min_s) / (max_s - min_s) for s in scores]
+
+
+def run_hybrid(bm25_map: dict, dense_map: dict, alpha: float, top_n: int) -> list:
+    """α * norm(BM25) + (1-α) * norm(Dense) 하이브리드 스코어 계산."""
+    results = []
+
+    for idx, bm25_item in bm25_map.items():
+        special_terms = bm25_item["special_terms"]
+        bm25_ranks    = bm25_item["rank_map"]
+
+        dense_records = dense_map.get(special_terms, [])
+        dense_scores  = {r["doc_id"]: r for r in dense_records}
+
+        all_ids = list(set(bm25_ranks.keys()) | set(dense_scores.keys()))
+
+        # BM25 rank → score 변환 (rank가 낮을수록 score 높게)
+        max_bm25_rank = max(bm25_ranks.values()) if bm25_ranks else 1
+        raw_bm25  = [1 - (bm25_ranks.get(did, max_bm25_rank + 1) - 1) / (max_bm25_rank) for did in all_ids]
+        raw_dense = [dense_scores[did]["score"] if did in dense_scores else 0.0 for did in all_ids]
+
+        norm_bm25  = min_max_normalize(raw_bm25)
+        norm_dense = min_max_normalize(raw_dense)
+
+        scored = []
+        for i, doc_id in enumerate(all_ids):
+            hybrid = alpha * norm_bm25[i] + (1 - alpha) * norm_dense[i]
+            dense_rec = dense_scores.get(doc_id, {})
+            scored.append({
+                "doc_id"       : doc_id,
+                "hybrid_score" : round(hybrid, 6),
+                "norm_bm25"    : round(norm_bm25[i], 6),
+                "norm_dense"   : round(norm_dense[i], 6),
+                "bm25_rank"    : bm25_ranks.get(doc_id, None),
+                "dense_rank"   : dense_rec.get("rank", None),
+                "doc_text"     : dense_rec.get("doc_text", ""),
+                "summary"      : dense_rec.get("summary", ""),
+            })
+
+        scored.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        top = scored[:top_n]
+        for rank, item in enumerate(top, 1):
+            item["rank"] = rank
+
+        results.append({
+            "index"        : idx,
+            "special_terms": special_terms,
+            "top_matches"  : top,
+        })
+
+    return results
+
+
+def run_a(
+    bm25_path: Path,
+    dense_path: Path,
+    id_field: str,
+    out_path: Path,
+    label: str,
+) -> None:
+    """하이브리드 스코어 기반 리랭킹 (α 공식)."""
+    print(f"\n{'='*70}")
+    print(f"{label} 하이브리드 리랭킹 시작 (α={ALPHA})")
+    print(f"{'='*70}")
+
+    print(f"  BM25 로드: {bm25_path.name}")
+    bm25_map = load_bm25(bm25_path, id_field)
+
+    print(f"  Dense 로드: {dense_path.name}")
+    dense_map = load_dense(dense_path, id_field, DENSE_TOP_K)
+
+    print("  하이브리드 스코어 계산 중...")
+    results = run_hybrid(bm25_map, dense_map, ALPHA, TOP_N)
+
+    for r in results:
+        print(f"\n[{r['index']}] {r['special_terms']}")
+        for m in r["top_matches"]:
+            print(f"  #{m['rank']} hybrid={m['hybrid_score']:.6f}  norm_bm25={m['norm_bm25']:.4f}  norm_dense={m['norm_dense']:.4f}")
+            print(f"         id={m['doc_id']}")
+            if m['doc_text']:
+                print(f"         {m['doc_text'][:80]}")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=2)
+    print(f"\n  저장 완료: {out_path}")
+    
+    
 
 def run(
     bm25_path: Path,
@@ -297,10 +388,27 @@ def main():
             bm25_path = files["bm25_case"],
             dense_path = files["dense_case"],
             id_field = PREC_ID_FIELD,
-            out_path = OUTPUT_DIR / f"{prefix}_reranking_lawcase.json",
+            out_path = OUTPUT_DIR / f"{prefix}_reranking_caselaw.json",
             label = f"{prefix} 판례",
         )
 
+        # 법령 하이브리드
+        run_a(
+            bm25_path  = files["bm25_law"],
+            dense_path = files["dense_law"],
+            id_field   = LAW_ID_FIELD,
+            out_path   = OUTPUT_DIR / f"{prefix}_reranking_law_a.json",
+            label      = f"{prefix} 법령",
+        )
+
+        # 판례 하이브리드
+        run_a(
+            bm25_path  = files["bm25_case"],
+            dense_path = files["dense_case"],
+            id_field   = PREC_ID_FIELD,
+            out_path   = OUTPUT_DIR / f"{prefix}_reranking_caselaw_a.json",
+            label      = f"{prefix} 판례",
+        )
 
 if __name__ == "__main__":
     main()
