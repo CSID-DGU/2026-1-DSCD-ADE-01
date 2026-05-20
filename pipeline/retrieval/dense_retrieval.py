@@ -57,11 +57,13 @@ KEYWORD_BOOST = 0.05
 MIN_SIMILARITY = {
     "embed_vertex": 0.4,
     "embed_kure":   0.3,
+    "embed_e5":     0.3,  # 추가 (KURE와 동일 기준으로 시작, 추후 조정)
 }
 
 MODEL_COLS = {
     "embed_vertex": "gemini-embedding-001",
     "embed_kure":   "nlpai-lab/KURE-v1",
+    "embed_e5":     "intfloat/multilingual-e5-large",  # 추가
 }
 
 LAW_TABLE  = "law_child"
@@ -70,11 +72,6 @@ PREC_TABLE = "case_law"
 LAW_KEEP_COLS  = ["clause_key", "child_text"]
 PREC_KEEP_COLS = ["case_id", "judgment_summary"]
 
-# TABLE_EMBED_COLS = {
-#     LAW_TABLE:  {"embed_vertex": "embed_vertex", "embed_kure": "embed_kure"},
-#     PREC_TABLE: {"embed_vertex": "embedding",    "embed_kure": "embedding_kure"},  # 임시 테스트
-# }
-
 # ============================================
 # Vertex AI 초기화
 # ============================================
@@ -82,6 +79,7 @@ vertexai.init(project=PROJECT_ID, location=LOCATION)
 
 _vertex_model_cache = {}
 _kure_model = None
+_e5_model = None
 
 
 def get_vertex_model(model_name: str) -> TextEmbeddingModel:
@@ -95,6 +93,13 @@ def get_kure_model() -> SentenceTransformer:
     if _kure_model is None:
         _kure_model = SentenceTransformer("nlpai-lab/KURE-v1")
     return _kure_model
+
+
+def get_e5_model() -> SentenceTransformer:
+    global _e5_model
+    if _e5_model is None:
+        _e5_model = SentenceTransformer("intfloat/multilingual-e5-large")
+    return _e5_model
 
 
 # ============================================
@@ -118,6 +123,12 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
     elif embed_col == "embed_kure":
         model = get_kure_model()
         vec   = model.encode(query_text, normalize_embeddings=True)
+        return np.array(vec, dtype=np.float32)
+    
+    elif embed_col == "embed_e5":
+        # E5는 쿼리 측에 "query: " 접두어 필요
+        model = get_e5_model()
+        vec   = model.encode("query: " + query_text, normalize_embeddings=True)
         return np.array(vec, dtype=np.float32)
 
     else:
@@ -219,14 +230,7 @@ def main():
 
     law_chunks  = {col: load_chunks(LAW_TABLE,  col, LAW_KEEP_COLS)  for col in MODEL_COLS}
     prec_chunks = {col: load_chunks(PREC_TABLE, col, PREC_KEEP_COLS) for col in MODEL_COLS}
-    # law_chunks  = {
-    #     col: load_chunks(LAW_TABLE,  TABLE_EMBED_COLS[LAW_TABLE][col],  LAW_KEEP_COLS)
-    #     for col in MODEL_COLS
-    # }
-    # prec_chunks = {
-    #     col: load_chunks(PREC_TABLE, TABLE_EMBED_COLS[PREC_TABLE][col], PREC_KEEP_COLS)
-    #     for col in MODEL_COLS
-    # }
+
     print()
 
     for query_file in query_files:

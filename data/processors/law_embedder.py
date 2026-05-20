@@ -31,6 +31,10 @@ VERTEX_BATCH_SIZE = 100
 # KURE 배치 크기 (메모리 상황에 따라 조정)
 KURE_BATCH_SIZE = 64
 
+E5_MODEL = "intfloat/multilingual-e5-large"
+E5_DOC_PREFIX = "passage: "
+E5_BATCH_SIZE = 32
+
 
 # ── Vertex AI 임베딩 ──────────────────────────────────────────────────
 
@@ -102,6 +106,26 @@ def embed_kure(texts: list[str], model) -> list[list[float]]:
 
     return results
 
+# ── E2 임베딩 ────────────────────────────────────────────────────────────
+
+def init_e5():
+    from sentence_transformers import SentenceTransformer
+    print(f"  E5 모델 로딩 중: {E5_MODEL}")
+    model = SentenceTransformer(E5_MODEL)
+    print("  E5 모델 로딩 완료")
+    return model
+
+
+def embed_e5(texts: list[str], model) -> list[list[float]]:
+    # 문서 측 입력에 "passage: " 접두어 필요
+    prefixed = [E5_DOC_PREFIX + t for t in texts]
+    results = []
+    total = len(prefixed)
+    for i in range(0, total, E5_BATCH_SIZE):
+        batch = prefixed[i: i + E5_BATCH_SIZE]
+        print(f"    E5 배치 {i // E5_BATCH_SIZE + 1} / {(total - 1) // E5_BATCH_SIZE + 1} ({len(batch)}건)")
+        results.extend(model.encode(batch, normalize_embeddings=True, show_progress_bar=False).tolist())
+    return results
 
 # ── 실행부 ────────────────────────────────────────────────────────────
 
@@ -110,39 +134,56 @@ def run(
     output_path: str | Path = OUTPUT_PATH,
     use_vertex: bool = True,
     use_kure: bool = True,
+    use_e5: bool = True,
 ) -> None:
-    """child CSV에 임베딩 컬럼을 추가한다."""
+    """child CSV에 임베딩 컬럼을 추가한다.
+    
+    각 모델별로 컬럼이 이미 존재하면 해당 모델 임베딩을 건너뛴다.
+    """
     input_path = Path(input_path)
     output_path = Path(output_path)
 
     print(f"[법령 embedder] 입력: {input_path}")
     print(f"[법령 embedder] 출력: {output_path}")
 
-    # CSV 로딩
     df = pd.read_csv(input_path, dtype={"paragraph_no": str})
     texts = df["child_text"].fillna("").tolist()
-    print(f"  총 {len(texts)}건 임베딩 대상")
+    print(f"  총 {len(texts)}건 로드 완료")
 
-    # Vertex AI 임베딩
+    step = 1
+
     if use_vertex:
-        print(f"\n[1/2] Vertex AI 임베딩 시작 (모델: {VERTEX_MODEL})")
-        init_vertex()
-        vertex_vectors = embed_vertex(texts)
-        df["embed_vertex"] = [json.dumps(v) for v in vertex_vectors]
-        print(f"  완료: {len(vertex_vectors)}건, 차원: {len(vertex_vectors[0])}")
+        if "embed_vertex" in df.columns:
+            print(f"\n[{step}] embed_vertex 컬럼 존재 → 건너뜀")
+        else:
+            print(f"\n[{step}] Vertex AI 임베딩 시작 (모델: {VERTEX_MODEL})")
+            init_vertex()
+            vectors = embed_vertex(texts)
+            df["embed_vertex"] = [json.dumps(v) for v in vectors]
+            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
+        step += 1
 
-    # KURE 임베딩
     if use_kure:
-        print(f"\n[2/2] KURE 임베딩 시작 (모델: {KURE_MODEL})")
-        kure_model = init_kure()
-        kure_vectors = embed_kure(texts, kure_model)
-        df["embed_kure"] = [json.dumps(v) for v in kure_vectors]
-        print(f"  완료: {len(kure_vectors)}건, 차원: {len(kure_vectors[0])}")
+        if "embed_kure" in df.columns:
+            print(f"\n[{step}] embed_kure 컬럼 존재 → 건너뜀")
+        else:
+            print(f"\n[{step}] KURE 임베딩 시작 (모델: {KURE_MODEL})")
+            kure_model = init_kure()
+            vectors = embed_kure(texts, kure_model)
+            df["embed_kure"] = [json.dumps(v) for v in vectors]
+            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
+        step += 1
 
-    # 저장
+    if use_e5:
+        if "embed_e5" in df.columns:
+            print(f"\n[{step}] embed_e5 컬럼 존재 → 건너뜀")
+        else:
+            print(f"\n[{step}] E5 임베딩 시작 (모델: {E5_MODEL})")
+            e5_model = init_e5()
+            vectors = embed_e5(texts, e5_model)
+            df["embed_e5"] = [json.dumps(v) for v in vectors]
+            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
+        step += 1
+
     df.to_csv(output_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
     print(f"\n저장 완료: {output_path}")
-
-
-if __name__ == "__main__":
-    run()
