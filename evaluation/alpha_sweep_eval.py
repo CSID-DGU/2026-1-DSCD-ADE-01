@@ -21,8 +21,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 SWEEP_CASE_WORKERS = 3  # 케이스 단위 병렬 처리 스레드 수
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -41,6 +39,7 @@ from evaluation.legal_retrieval_eval_multi import (
     load_bm25_corpus,
     load_semantic_chunks,
     log_progress,
+    minmax_normalize,
     ratio,
     run_bm25_retrieval,
     run_semantic_retrieval_for_embed_col,
@@ -48,16 +47,6 @@ from evaluation.legal_retrieval_eval_multi import (
     semantic_embed_config,
 )
 from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
-
-
-# ── 정규화 ────────────────────────────────────────────────────────────────
-
-def minmax_normalize(scores: list[float]) -> list[float]:
-    arr = np.array(scores, dtype=np.float64)
-    lo, hi = arr.min(), arr.max()
-    if hi == lo:
-        return [0.0] * len(scores)
-    return ((arr - lo) / (hi - lo)).tolist()
 
 
 # ── 공통 리랭킹 ───────────────────────────────────────────────────────────
@@ -106,16 +95,16 @@ def run_alpha_hybrid(
         if not result_map:
             continue
 
-        rids = list(result_map.keys())
-        bm25_norm = minmax_normalize([result_map[rid]["bm25_score_raw"] for rid in rids])
-        dense_norm = minmax_normalize([result_map[rid]["dense_score_raw"] for rid in rids])
+        # dict 기반 min-max 정규화 (legal_retrieval_eval_multi.minmax_normalize 공유)
+        norm_bm25 = minmax_normalize({rid: e["bm25_score_raw"] for rid, e in result_map.items()})
+        norm_dense = minmax_normalize({rid: e["dense_score_raw"] for rid, e in result_map.items()})
 
         scored: list[tuple[float, str, dict[str, Any]]] = []
-        for i, rid in enumerate(rids):
-            stype = result_map[rid].get("source_type", "")
+        for rid, entry in result_map.items():
+            stype = entry.get("source_type", "")
             alpha = alpha_prec if stype == "precedent" else alpha_law
-            combined = alpha * bm25_norm[i] + (1.0 - alpha) * dense_norm[i]
-            scored.append((combined, rid, result_map[rid]))
+            combined = alpha * norm_bm25.get(rid, 0.0) + (1.0 - alpha) * norm_dense.get(rid, 0.0)
+            scored.append((combined, rid, entry))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 

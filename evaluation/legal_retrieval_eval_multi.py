@@ -1090,8 +1090,8 @@ def run_reranking(
     raise ValueError(f"unsupported rerank_type: {rerank_type}")
 
 
-def _minmax_normalize(scores: dict[str, float]) -> dict[str, float]:
-    """result_id → score 딕셔너리를 min-max 정규화."""
+def minmax_normalize(scores: dict[str, float]) -> dict[str, float]:
+    """result_id → score 딕셔너리를 [0, 1] min-max 정규화. (공개 공통 함수)"""
     if not scores:
         return {}
     values = list(scores.values())
@@ -1134,8 +1134,8 @@ def run_alpha_hybrid_reranking(
 
     reranked_results: list[dict[str, Any]] = []
     for ci, meta in clause_meta.items():
-        norm_bm25 = _minmax_normalize(bm25_scores.get(ci, {}))
-        norm_dense = _minmax_normalize(dense_scores.get(ci, {}))
+        norm_bm25 = minmax_normalize(bm25_scores.get(ci, {}))
+        norm_dense = minmax_normalize(dense_scores.get(ci, {}))
 
         all_ids = set(norm_bm25) | set(norm_dense)
         combined: list[tuple[str, float, float, float, str]] = []
