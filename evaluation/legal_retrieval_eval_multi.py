@@ -495,6 +495,24 @@ def parse_args() -> argparse.Namespace:
             "API 호출 제한이 있으면 낮추세요. 1이면 순차 실행."
         ),
     )
+    parser.add_argument(
+        "--alpha-law",
+        type=float,
+        default=ALPHA_LAW,
+        help=(
+            f"법령 hybrid 가중치 — BM25 α, Dense (1-α) (default: {ALPHA_LAW}). "
+            "값이 낮을수록 Dense 가중치가 커집니다."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-prec",
+        type=float,
+        default=ALPHA_PREC,
+        help=(
+            f"판례 hybrid 가중치 — BM25 α, Dense (1-α) (default: {ALPHA_PREC}). "
+            "값이 높을수록 BM25 가중치가 커집니다."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -617,7 +635,12 @@ def build_case_contexts(
 
 # ── 파이프라인 실행 ───────────────────────────────────────────────────────
 
-def run_case_pipeline(context: CaseExecutionContext, expand_fn=None) -> None:
+def run_case_pipeline(
+    context: CaseExecutionContext,
+    expand_fn=None,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
+) -> None:
     if expand_fn is None:
         expand_fn = expand_case_queries_with_llm
 
@@ -682,6 +705,8 @@ def run_case_pipeline(context: CaseExecutionContext, expand_fn=None) -> None:
                     rerank_type=rerank_type,
                     keyword_results=context.keyword_results,
                     semantic_results=sem_results,
+                    alpha_law=alpha_law,
+                    alpha_prec=alpha_prec,
                 )
                 experiment_key = f"{embed_col}__{rerank_type}"
                 context.reranked_results_by_config[experiment_key] = reranked
@@ -1933,8 +1958,13 @@ def count_case_statuses(case_reports: list[dict[str, Any]]) -> dict[str, int]:
 
 # ── 케이스 리포트 빌드 ─────────────────────────────────────────────────────
 
-def build_case_report(context: CaseExecutionContext, expand_fn=None) -> dict[str, Any]:
-    run_case_pipeline(context, expand_fn=expand_fn)
+def build_case_report(
+    context: CaseExecutionContext,
+    expand_fn=None,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
+) -> dict[str, Any]:
+    run_case_pipeline(context, expand_fn=expand_fn, alpha_law=alpha_law, alpha_prec=alpha_prec)
     return case_report_payload(context)
 
 
@@ -2147,6 +2177,8 @@ def build_report(
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
     case_workers: int = CASE_WORKERS,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
 ) -> dict[str, Any]:
     selected_embed_cols = normalize_semantic_embed_cols(
         semantic_embed_cols, semantic_embed_col=semantic_embed_col
@@ -2175,7 +2207,10 @@ def build_report(
             f"case_start index={context.case_index + 1}/{len(contexts)} "
             f"case_id={context.case_id}"
         )
-        case_report = build_case_report(context, expand_fn=expand_fn)
+        case_report = build_case_report(
+            context, expand_fn=expand_fn,
+            alpha_law=alpha_law, alpha_prec=alpha_prec,
+        )
         log_progress(
             f"case_done index={context.case_index + 1}/{len(contexts)} "
             f"case_id={context.case_id} status={case_report['status']}"
@@ -2539,6 +2574,8 @@ def run(
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
     case_workers: int = CASE_WORKERS,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
 ) -> Path:
     assert_real_pipeline_imports_available()
     expand_fn = expand_case_queries_with_llm
@@ -2546,6 +2583,7 @@ def run(
     log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_selected cases={len(cases)} case_id={case_id or 'all'}")
+    log_progress(f"alpha_law={alpha_law} alpha_prec={alpha_prec}")
     report = build_report(
         input_path=input_path,
         cases=cases,
@@ -2554,6 +2592,8 @@ def run(
         semantic_embed_cols=semantic_embed_cols,
         semantic_embed_col=semantic_embed_col,
         case_workers=case_workers,
+        alpha_law=alpha_law,
+        alpha_prec=alpha_prec,
     )
     report_path = save_report(report, output_path=output_path)
     log_progress(f"report_saved path={report_path}")
@@ -2572,6 +2612,8 @@ def main() -> int:
             output_path=output_path,
             semantic_embed_cols=args.semantic_embed_cols,
             case_workers=args.case_workers,
+            alpha_law=args.alpha_law,
+            alpha_prec=args.alpha_prec,
         )
     except PipelineImportError as error:
         print(f"error: {error}", file=sys.stderr)
