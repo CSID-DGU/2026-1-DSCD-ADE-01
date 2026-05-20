@@ -318,8 +318,13 @@ def run_sweep(
     mode: str,
     case_id: str | None,
     output_path: Path | None,
+    bm25_top_k: int = 40,
+    dense_top_k: int = 80,
 ) -> Path:
-    log_progress(f"alpha_sweep_{mode}_start embed_col={embed_col} pairs={len(alpha_pairs)} top_k={top_k}")
+    log_progress(
+        f"alpha_sweep_{mode}_start embed_col={embed_col} pairs={len(alpha_pairs)} "
+        f"top_k={top_k} bm25_top_k={bm25_top_k} dense_top_k={dense_top_k}"
+    )
 
     dataset = load_dataset(input_path)
     cases = select_cases(dataset, case_id)
@@ -338,6 +343,7 @@ def run_sweep(
             result = evaluate_case(
                 case=case, embed_col=embed_col,
                 alpha_pairs=alpha_pairs, top_k=top_k,
+                bm25_top_k=bm25_top_k, dense_top_k=dense_top_k,
             )
         except Exception as exc:  # noqa: BLE001
             log_progress(f"case_failed case_id={case['case_id']} error={exc}")
@@ -354,7 +360,7 @@ def run_sweep(
         futures = {pool.submit(_run_one, (i, case)): i for i, case in enumerate(cases)}
         for fut in as_completed(futures):
             idx, result = fut.result()
-            case_results[idx] = result
+            case_results[idx] = result  # type: ignore[index]
             completed += 1
             log_progress(
                 f"case_done {completed}/{len(cases)} "
@@ -373,6 +379,8 @@ def run_sweep(
             "embed_config": semantic_embed_config(embed_col),
             "alpha_pairs": alpha_pairs,
             "top_k": top_k,
+            "bm25_top_k": bm25_top_k,
+            "dense_top_k": dense_top_k,
             "primary_k": primary_k,
             "case_count": len(cases),
         },
@@ -406,9 +414,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha-end",   type=float, default=1.0)
     parser.add_argument("--alpha-step",  type=float, default=0.1,
                         help="alpha 간격 (1d: 11단계, 2d: step=0.2 추천 → 6×6=36 조합)")
-    parser.add_argument("--top-k",     type=int, default=20)
+    parser.add_argument("--top-k",     type=int, default=20,
+                        help="최종 리랭킹 후 반환할 문서 수 (default: 20)")
     parser.add_argument("--primary-k", type=int, default=10,
                         help="최적 alpha 선택 기준 K (default: 10)")
+    parser.add_argument("--bm25-top-k", type=int, default=40,
+                        help="BM25 1차 검색 후보 수 (default: 40). 클수록 후보 풀이 넓어집니다.")
+    parser.add_argument("--dense-top-k", type=int, default=80,
+                        help="Dense 1차 검색 후보 수 (default: 80). 클수록 후보 풀이 넓어집니다.")
     parser.add_argument("--case-id", help="특정 case_id만 평가")
     parser.add_argument("--output")
     return parser.parse_args()
@@ -442,6 +455,8 @@ def main() -> int:
                 mode=args.mode,
                 case_id=args.case_id,
                 output_path=Path(args.output) if args.output else None,
+                bm25_top_k=args.bm25_top_k,
+                dense_top_k=args.dense_top_k,
             )
         except (PipelineImportError, DatasetValidationError) as exc:
             print(f"error: {exc}", file=sys.stderr)
