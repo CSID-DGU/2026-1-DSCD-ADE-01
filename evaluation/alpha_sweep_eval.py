@@ -16,11 +16,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+SWEEP_CASE_WORKERS = 3  # 케이스 단위 병렬 처리 스레드 수
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -44,7 +47,7 @@ from evaluation.legal_retrieval_eval_multi import (
     select_cases,
     semantic_embed_config,
 )
-from pipeline.retrieval.evaluation_retrieval import expand_case_queries
+from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
 
 
 # ── 정규화 ────────────────────────────────────────────────────────────────
@@ -141,7 +144,7 @@ def evaluate_case(
     dense_top_k: int = 80,
 ) -> dict[str, Any]:
     """BM25+Dense를 1회 수행 후 모든 (alpha_law, alpha_prec) 조합을 평가."""
-    expanded_queries = expand_case_queries(case)
+    expanded_queries = expand_case_queries_with_llm(case)
 
     keyword_results = run_bm25_retrieval(
         case=case, expanded_queries=expanded_queries, top_k=bm25_top_k,
@@ -325,9 +328,12 @@ def run_sweep(
     load_bm25_corpus()
     load_semantic_chunks(embed_col)
 
-    case_results: list[dict[str, Any]] = []
-    for i, case in enumerate(cases, 1):
-        log_progress(f"case_start {i}/{len(cases)} case_id={case['case_id']}")
+    case_results: list[dict[str, Any]] = [None] * len(cases)  # 순서 보존용
+    completed = 0
+
+    def _run_one(idx_case: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+        idx, case = idx_case
+        log_progress(f"case_start {idx + 1}/{len(cases)} case_id={case['case_id']}")
         try:
             result = evaluate_case(
                 case=case, embed_col=embed_col,
@@ -342,8 +348,18 @@ def run_sweep(
                 "precedent_references": case.get("precedent_references", []),
                 "alpha_metrics": {},
             }
-        case_results.append(result)
-        log_progress(f"case_done {i}/{len(cases)} case_id={case['case_id']} status={result['status']}")
+        return idx, result
+
+    with ThreadPoolExecutor(max_workers=SWEEP_CASE_WORKERS) as pool:
+        futures = {pool.submit(_run_one, (i, case)): i for i, case in enumerate(cases)}
+        for fut in as_completed(futures):
+            idx, result = fut.result()
+            case_results[idx] = result
+            completed += 1
+            log_progress(
+                f"case_done {completed}/{len(cases)} "
+                f"case_id={result['case_id']} status={result['status']}"
+            )
 
     summary = aggregate(case_results, alpha_pairs)
     best_al, best_ap, best_score = find_best(summary, primary_k=primary_k)
