@@ -124,6 +124,12 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
         model = get_kure_model()
         vec   = model.encode(query_text, normalize_embeddings=True)
         return np.array(vec, dtype=np.float32)
+    
+    elif embed_col == "embed_e5":
+        # E5는 쿼리 측에 "query: " 접두어 필요
+        model = get_e5_model()
+        vec   = model.encode("query: " + query_text, normalize_embeddings=True)
+        return np.array(vec, dtype=np.float32)
 
     elif embed_col == "embed_e5":
         # E5는 쿼리 측에 "query: " 접두어 필요
