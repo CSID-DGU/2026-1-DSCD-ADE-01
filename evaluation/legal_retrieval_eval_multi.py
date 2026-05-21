@@ -513,6 +513,16 @@ def parse_args() -> argparse.Namespace:
             "값이 높을수록 BM25 가중치가 커집니다."
         ),
     )
+    parser.add_argument(
+        "--qe-cache",
+        metavar="PATH",
+        default=None,
+        help=(
+            "이전 실행 결과 JSON 경로 (evaluation/results/ 아래 파일). "
+            "지정 시 Query Expansion LLM 호출을 스킵하고 캐시된 expanded_queries를 재사용합니다. "
+            "캐시에 없는 case_id는 LLM을 호출합니다."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -631,6 +641,34 @@ def build_case_contexts(
         )
         for index, case in enumerate(cases)
     ]
+
+
+# ── QE 캐시 ──────────────────────────────────────────────────────────────
+
+def load_qe_cache(path: Path) -> dict[str, list[dict[str, Any]]]:
+    """이전 실행 결과 JSON에서 case_id → expanded_queries 매핑을 로드한다."""
+    with path.open("r", encoding="utf-8") as f:
+        report = json.load(f)
+    cache: dict[str, list[dict[str, Any]]] = {}
+    for case_report in report.get("cases", []):
+        case_id = case_report.get("case_id")
+        expanded = case_report.get("expanded_queries")
+        if case_id and isinstance(expanded, list):
+            cache[case_id] = expanded
+    return cache
+
+
+def make_cached_expand_fn(cache: dict[str, list[dict[str, Any]]]):
+    """캐시에서 expanded_queries를 반환하는 expand_fn을 생성한다.
+    캐시에 없는 case_id는 LLM을 호출한다."""
+    def expand_fn(case: dict[str, Any]) -> list[dict[str, Any]]:
+        case_id = case.get("case_id", "")
+        if case_id in cache:
+            log_progress(f"qe_cache_hit case_id={case_id}")
+            return cache[case_id]
+        log_progress(f"qe_cache_miss case_id={case_id} falling_back_to_llm")
+        return expand_case_queries_with_llm(case)
+    return expand_fn
 
 
 # ── 파이프라인 실행 ───────────────────────────────────────────────────────
@@ -2576,9 +2614,15 @@ def run(
     case_workers: int = CASE_WORKERS,
     alpha_law: float = ALPHA_LAW,
     alpha_prec: float = ALPHA_PREC,
+    qe_cache_path: Path | None = None,
 ) -> Path:
     assert_real_pipeline_imports_available()
-    expand_fn = expand_case_queries_with_llm
+    if qe_cache_path is not None:
+        cache = load_qe_cache(qe_cache_path)
+        expand_fn = make_cached_expand_fn(cache)
+        log_progress(f"qe_cache_loaded path={qe_cache_path} entries={len(cache)}")
+    else:
+        expand_fn = expand_case_queries_with_llm
     dataset = load_dataset(input_path)
     log_progress(f"dataset_loaded input_path={input_path} cases={len(dataset)}")
     cases = select_cases(dataset, case_id)
@@ -2604,6 +2648,7 @@ def main() -> int:
     args = parse_args()
     input_path = Path(args.input)
     output_path = Path(args.output) if args.output else None
+    qe_cache_path = Path(args.qe_cache) if args.qe_cache else None
 
     try:
         report_path = run(
@@ -2614,6 +2659,7 @@ def main() -> int:
             case_workers=args.case_workers,
             alpha_law=args.alpha_law,
             alpha_prec=args.alpha_prec,
+            qe_cache_path=qe_cache_path,
         )
     except PipelineImportError as error:
         print(f"error: {error}", file=sys.stderr)

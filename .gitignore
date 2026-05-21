@@ -42,3 +42,5 @@ tests/pipeline/query_expansion_v1/
 # test
 tests/
 frontend/
+
+.log/
