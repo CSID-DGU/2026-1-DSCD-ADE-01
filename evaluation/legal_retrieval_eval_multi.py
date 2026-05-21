@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -658,7 +658,7 @@ def load_qe_cache(path: Path) -> dict[str, list[dict[str, Any]]]:
     return cache
 
 
-def make_cached_expand_fn(cache: dict[str, list[dict[str, Any]]]):
+def make_cached_expand_fn(cache: dict[str, list[dict[str, Any]]]) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
     """캐시에서 expanded_queries를 반환하는 expand_fn을 생성한다.
     캐시에 없는 case_id는 LLM을 호출한다."""
     def expand_fn(case: dict[str, Any]) -> list[dict[str, Any]]:
