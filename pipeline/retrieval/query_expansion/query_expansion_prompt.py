@@ -33,6 +33,23 @@ CLAUSE_SPECIFIC_TERMS_GUIDE = dedent(
 ).strip()
 
 
+STATUTE_LANGUAGE_GUIDE = dedent(
+    """
+    [법령 조문 언어 사용 원칙]
+    - expansion_query와 keywords에 법령 조문에서 실제로 사용되는 용어를 포함한다.
+    - 일상 언어 대신 법령 조문 언어를 우선한다:
+      · 임대료 → 차임
+      · 3개월 연체 → 차임연체액이 2기의 차임액에 달하는
+      · 계약 해지 통보 → 해지 통고, 해지 최고
+      · 집 수리 → 필요비·유익비 상환, 수선의무
+      · 보증금 반환 거부 → 동시이행항변권, 보증금반환채무
+      · 이사 나가기 → 명도, 인도
+      · 재계약 거부 → 갱신거절, 갱신요구권
+    - 법령 조문 언어를 쓰되, 특약의 구체 사실은 그대로 유지한다.
+    """
+).strip()
+
+
 NO_FINAL_JUDGMENT_GUIDE = dedent(
     """
     [최종 판단 금지]
@@ -46,7 +63,7 @@ NO_FINAL_JUDGMENT_GUIDE = dedent(
 KEYWORDS_GUIDE = dedent(
     """
     [keywords 작성 규칙]
-    - 3~5개의 구체 명사구만 작성한다.
+    - 3~7개의 구체 명사구만 작성한다.
     - 입력 특약의 구체 상황을 반영한 복합 명사구를 우선한다.
     - 단독 일반어(계약, 특약, 분쟁, 임대인, 임차인, 민법)는 쓰지 않는다.
     - 거의 모든 특약에 공통되는 용어(주택임대차보호법, 강행규정, 임차인 불리 약정,
@@ -93,6 +110,8 @@ SYSTEM_PROMPT = dedent(
 
     {SPECIFICITY_ANCHOR_GUIDE}
 
+    {STATUTE_LANGUAGE_GUIDE}
+
     {NO_FINAL_JUDGMENT_GUIDE}
 
     [keywords]
@@ -120,7 +139,49 @@ def build_user_prompt(clause_text: str) -> str:
         - 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함한다.
         - 특약을 일반 법률 범주로 치환하지 말고, 이 특약의 구체 상황을 그대로 서술한다.
         - 최종 법률 판단을 하지 말고 쟁점·문제 여부만 서술한다.
-        - keywords는 3~5개의 이 특약에 특화된 구체 명사구로 작성한다.
+        - keywords는 3~7개의 이 특약에 특화된 구체 명사구로 작성한다.
+        - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
+        """
+    ).strip()
+
+
+def build_user_prompt_law(clause_text: str) -> str:
+    return dedent(
+        f"""
+        다음 임대차 계약서 특약 조항을 법령 검색에 최적화된 ClauseQueryExpansion으로 변환하라.
+
+        입력 특약:
+        {clause_text}
+
+        작성 지시:
+        - 출력은 순수 JSON 객체 하나만 생성한다.
+        - 코드블록, 설명문, 주석을 출력하지 않는다.
+        - expansion_query는 섹션 라벨 없이 산문 2~3문장으로 작성한다(300자 이내).
+        - 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함한다.
+        - expansion_query에 이 특약과 관련된 법령 조문 언어(의무, 금지, 효력, 위반, 적용 범위 등)를 포함한다.
+        - 최종 법률 판단을 하지 말고 적용 법령 쟁점만 서술한다.
+        - keywords는 3~5개로, 법령 조문 검색에 유효한 법률 개념어 위주로 작성한다.
+        - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
+        """
+    ).strip()
+
+
+def build_user_prompt_precedent(clause_text: str) -> str:
+    return dedent(
+        f"""
+        다음 임대차 계약서 특약 조항을 판례 검색에 최적화된 ClauseQueryExpansion으로 변환하라.
+
+        입력 특약:
+        {clause_text}
+
+        작성 지시:
+        - 출력은 순수 JSON 객체 하나만 생성한다.
+        - 코드블록, 설명문, 주석을 출력하지 않는다.
+        - expansion_query는 섹션 라벨 없이 산문 2~3문장으로 작성한다(300자 이내).
+        - 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함한다.
+        - expansion_query에 이 특약과 관련된 분쟁 사실관계(임대인·임차인 간 갈등 상황, 청구 내용, 피해 유형)를 포함한다.
+        - 최종 법률 판단을 하지 말고 판례 쟁점만 서술한다.
+        - keywords는 3~5개로, 판례 검색에 유효한 분쟁 사실관계 명사구 위주로 작성한다.
         - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
         """
     ).strip()

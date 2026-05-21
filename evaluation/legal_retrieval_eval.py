@@ -83,7 +83,7 @@ def retrieve_clause(clause: str, corpus: dict) -> dict:
     """단일 특약에 대해 Query Expansion → BM25 → Dense → RRF를 실행한다."""
     # Query Expansion
     expansion = expand_clause(clause)
-    payload = build_retrieval_payload(expansion)
+    payload = build_retrieval_payload(expansion, clause_text=clause)
     log.info("    QE keywords: %s", payload["bm25_keywords"])
 
     # BM25

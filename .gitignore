@@ -11,6 +11,7 @@ data/law_chunks/
 evaluation/results/
 keyword_analysis_output/
 output/
+*.log
 
 # Python
 __pycache__/
