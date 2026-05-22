@@ -89,7 +89,7 @@ LAW_SEMANTIC_EMBED_COL = SEMANTIC_EMBED_CONFIGS[DEFAULT_SEMANTIC_EMBED_COL]["law
 PRECEDENT_SEMANTIC_EMBED_COL = SEMANTIC_EMBED_CONFIGS[DEFAULT_SEMANTIC_EMBED_COL]["precedent_embed_col"]
 
 # reranker 종류
-RERANKERS = ["alpha_hybrid"]
+RERANKERS = ["rrf"]
 
 # Alpha hybrid — 법령/판례 각각 BM25 가중치 (1-α = Dense 가중치)
 # 법령: Dense 우세 → α 낮게 / 판례: BM25 우세 → α 높게
@@ -710,7 +710,7 @@ def run_case_pipeline(
         def _retrieve_for_col(embed_col: str) -> tuple[str, list]:
             return embed_col, run_semantic_retrieval_for_embed_col(
                 expanded_queries=context.expanded_queries,
-                top_k=40,
+                top_k=50,
                 semantic_embed_col=embed_col,
             )
 
@@ -733,7 +733,7 @@ def run_case_pipeline(
             f"semantic_results={semantic_result_count}"  # FIX: int, not len(int)
         )
 
-        # ── 3. Reranking (embed_col × rerank_type 조합) ─────────────────
+        # ── 3. Reranking (embed_col별 RRF) ───────────────────────────────
         current_stage = "reranking"
         log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
 
@@ -793,6 +793,19 @@ def run_case_pipeline(
 
 # ── BM25 ──────────────────────────────────────────────────────────────────
 
+def build_enriched_query_tokens(query: dict[str, Any]) -> list[str]:
+    """bm25_keywords + dense_query 형태소 분석 토큰을 결합한 풍부한 쿼리 토큰 생성.
+
+    dense_query에는 법령 조문 언어(차임, 수선의무 등)가 포함되어 있어
+    keywords만으로는 커버되지 않는 법령 원문 어휘를 보완한다.
+    """
+    payload = query["retrieval_payload"]
+    keyword_tokens = build_query_tokens(payload["bm25_keywords"])
+    dense_tokens = tokenize(payload.get("dense_query", ""))
+    combined = keyword_tokens + [t for t in dense_tokens if t not in set(keyword_tokens)]
+    return list(dict.fromkeys(combined))
+
+
 def run_bm25_retrieval(
     *,
     case: dict[str, Any],
@@ -812,7 +825,7 @@ def run_bm25_retrieval(
     law_documents, law_bm25, precedent_documents, precedent_bm25 = load_bm25_corpus()
     results: list[dict[str, Any]] = []
     for query in expanded_queries:
-        query_tokens = build_query_tokens(query["retrieval_payload"]["bm25_keywords"])
+        query_tokens = build_enriched_query_tokens(query)
         results.extend(
             bm25_results_for_documents(
                 query=query,
@@ -844,7 +857,7 @@ def run_bm25_over_documents(
     bm25 = BM25Okapi(corpus_tokens)
     results: list[dict[str, Any]] = []
     for query in expanded_queries:
-        query_tokens = build_query_tokens(query["retrieval_payload"]["bm25_keywords"])
+        query_tokens = build_enriched_query_tokens(query)
         results.extend(
             bm25_results_for_documents(
                 query=query,
@@ -1101,6 +1114,21 @@ def semantic_document_text(row: dict[str, Any]) -> str:
 
 
 # ── Reranking ─────────────────────────────────────────────────────────────
+
+def merge_semantic_results_union(
+    semantic_results_by_model: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """embed_col별 semantic 결과를 union하고 (clause_index, result_id) 당 최고 score 유지."""
+    best: dict[tuple[int, str], dict[str, Any]] = {}
+    for model_results in semantic_results_by_model.values():
+        for r in model_results:
+            key = (int(r["clause_index"]), str(r["result_id"]))
+            score = float(r.get("score", r.get("similarity", 0.0)))
+            existing = best.get(key)
+            if existing is None or score > float(existing.get("score", existing.get("similarity", 0.0))):
+                best[key] = dict(r)
+    return list(best.values())
+
 
 def run_reranking(
     *,

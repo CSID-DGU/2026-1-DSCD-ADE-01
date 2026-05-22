@@ -39,12 +39,12 @@ LOCATION   = os.getenv("GCP_LOCATION")
 # ============================================
 # 상수 설정
 # ============================================
-TOP_K = 20
+TOP_K = 50
 
 MIN_SIMILARITY = {
-    "embed_vertex": 0.2,
-    "embed_kure":   0.2,
-    "embed_e5":     0.2,
+    "embed_vertex": 0.0,
+    "embed_kure":   0.0,
+    "embed_e5":     0.0,
 }
 
 MODEL_COLS = {
