@@ -18,23 +18,25 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 # ── 경로 설정 ─────────────────────────────────────────────────────────
 
 DATA_DIR = Path(__file__).parent.parent
-INPUT_PATH = DATA_DIR / "law_chunks" / "law_child.csv"
-OUTPUT_PATH = DATA_DIR / "law_chunks" / "law_child.csv"
+INPUT_PATH = DATA_DIR / "raw" / "law_child.csv"
+OUTPUT_PATH = DATA_DIR / "raw" / "law_child.csv"
 
 # ── 상수 ──────────────────────────────────────────────────────────────
 
 VERTEX_MODEL = "gemini-embedding-001"
 KURE_MODEL = "nlpai-lab/KURE-v1"
+KOLEGAL_MODEL = "woong0322/ko-legal-sbert-finetuned"
+E5_MODEL = "intfloat/multilingual-e5-large"
 
 # Vertex AI 배치 크기 (API 제한: 최대 250)
 VERTEX_BATCH_SIZE = 100
 # KURE 배치 크기 (메모리 상황에 따라 조정)
 KURE_BATCH_SIZE = 64
 
-E5_MODEL = "intfloat/multilingual-e5-large"
 E5_DOC_PREFIX = "passage: "
 E5_BATCH_SIZE = 32
 
+KOLEGAL_BATCH_SIZE = 64
 
 # ── Vertex AI 임베딩 ──────────────────────────────────────────────────
 
@@ -127,6 +129,43 @@ def embed_e5(texts: list[str], model) -> list[list[float]]:
         results.extend(model.encode(batch, normalize_embeddings=True, show_progress_bar=False).tolist())
     return results
 
+# ── kolegal 임베딩 ────────────────────────────────────────────────────────────
+
+def init_kolegal():
+    """KoLegal 모델을 로딩한다."""
+    from sentence_transformers import SentenceTransformer
+
+    print(f"  KoLegal 모델 로딩 중: {KOLEGAL_MODEL}")
+    model = SentenceTransformer(KOLEGAL_MODEL)
+    print("  KoLegal 모델 로딩 완료")
+
+    return model
+
+def embed_kolegal(texts: list[str], model) -> list[list[float]]:
+    """전체 텍스트 목록을 KoLegal로 배치 임베딩한다."""
+    results = []
+    total = len(texts)
+
+    for i in range(0, total, KOLEGAL_BATCH_SIZE):
+        batch = texts[i: i + KOLEGAL_BATCH_SIZE]
+
+        print(
+            f"    KoLegal 배치 "
+            f"{i // KOLEGAL_BATCH_SIZE + 1} / "
+            f"{(total - 1) // KOLEGAL_BATCH_SIZE + 1} "
+            f"({len(batch)}건)"
+        )
+
+        vectors = model.encode(
+            batch,
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+
+        results.extend(vectors.tolist())
+
+    return results
+
 # ── 실행부 ────────────────────────────────────────────────────────────
 
 def run(
@@ -135,6 +174,7 @@ def run(
     use_vertex: bool = True,
     use_kure: bool = True,
     use_e5: bool = True,
+    use_kolegal: bool = True,
 ) -> None:
     """child CSV에 임베딩 컬럼을 추가한다.
     
@@ -185,5 +225,20 @@ def run(
             print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
         step += 1
 
+    if use_kolegal:
+        if "embed_kolegal" in df.columns:
+            print(f"\n[{step}] embed_kolegal 컬럼 존재 → 건너뜀")
+        else:
+            print(f"\n[{step}] KoLegal 임베딩 시작 (모델: {KOLEGAL_MODEL})")
+            kolegal_model = init_kolegal()
+            vectors = embed_kolegal(texts, kolegal_model)
+            df["embed_kolegal"] = [json.dumps(v) for v in vectors]
+            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
+        step += 1
+        
     df.to_csv(output_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
     print(f"\n저장 완료: {output_path}")
+    
+    
+if __name__ == "__main__":
+    run()
