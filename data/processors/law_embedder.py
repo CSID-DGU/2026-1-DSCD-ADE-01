@@ -2,7 +2,8 @@
 
 사용 모델:
 - Vertex AI: gemini-embedding-001 (3072차원)
-- KURE-v1: nlpai-lab/KURE-v1 (1024차원)
+
+임베딩 텍스트: parent_text + child_text (prefix 방식)
 """
 
 import json
@@ -18,25 +19,17 @@ load_dotenv(Path(__file__).parent.parent.parent / ".env")
 # ── 경로 설정 ─────────────────────────────────────────────────────────
 
 DATA_DIR = Path(__file__).parent.parent
-INPUT_PATH = DATA_DIR / "raw" / "law_child.csv"
-OUTPUT_PATH = DATA_DIR / "raw" / "law_child.csv"
+INPUT_CHILD_PATH = DATA_DIR / "raw" / "law_child.csv"
+INPUT_PARENT_PATH = DATA_DIR / "raw" / "law_parent.csv"
+OUTPUT_PATH = DATA_DIR / "raw" / "law_child_vertex.csv"
 
 # ── 상수 ──────────────────────────────────────────────────────────────
 
 VERTEX_MODEL = "gemini-embedding-001"
-KURE_MODEL = "nlpai-lab/KURE-v1"
-KOLEGAL_MODEL = "woong0322/ko-legal-sbert-finetuned"
-E5_MODEL = "intfloat/multilingual-e5-large"
 
 # Vertex AI 배치 크기 (API 제한: 최대 250)
 VERTEX_BATCH_SIZE = 100
-# KURE 배치 크기 (메모리 상황에 따라 조정)
-KURE_BATCH_SIZE = 64
 
-E5_DOC_PREFIX = "passage: "
-E5_BATCH_SIZE = 32
-
-KOLEGAL_BATCH_SIZE = 64
 
 # ── Vertex AI 임베딩 ──────────────────────────────────────────────────
 
@@ -83,162 +76,78 @@ def embed_vertex(texts: list[str]) -> list[list[float]]:
     return results
 
 
-# ── KURE 임베딩 ───────────────────────────────────────────────────────
-
-def init_kure():
-    """KURE 모델을 로딩한다."""
-    from sentence_transformers import SentenceTransformer
-
-    print(f"  KURE 모델 로딩 중: {KURE_MODEL}")
-    model = SentenceTransformer(KURE_MODEL)
-    print("  KURE 모델 로딩 완료")
-    return model
-
-
-def embed_kure(texts: list[str], model) -> list[list[float]]:
-    """전체 텍스트 목록을 KURE로 배치 임베딩한다."""
-    results = []
-    total = len(texts)
-
-    for i in range(0, total, KURE_BATCH_SIZE):
-        batch = texts[i: i + KURE_BATCH_SIZE]
-        print(f"    KURE 배치 {i // KURE_BATCH_SIZE + 1} / {(total - 1) // KURE_BATCH_SIZE + 1} ({len(batch)}건)")
-        vectors = model.encode(batch, show_progress_bar=False)
-        results.extend(vectors.tolist())
-
-    return results
-
-# ── E2 임베딩 ────────────────────────────────────────────────────────────
-
-def init_e5():
-    from sentence_transformers import SentenceTransformer
-    print(f"  E5 모델 로딩 중: {E5_MODEL}")
-    model = SentenceTransformer(E5_MODEL)
-    print("  E5 모델 로딩 완료")
-    return model
-
-
-def embed_e5(texts: list[str], model) -> list[list[float]]:
-    # 문서 측 입력에 "passage: " 접두어 필요
-    prefixed = [E5_DOC_PREFIX + t for t in texts]
-    results = []
-    total = len(prefixed)
-    for i in range(0, total, E5_BATCH_SIZE):
-        batch = prefixed[i: i + E5_BATCH_SIZE]
-        print(f"    E5 배치 {i // E5_BATCH_SIZE + 1} / {(total - 1) // E5_BATCH_SIZE + 1} ({len(batch)}건)")
-        results.extend(model.encode(batch, normalize_embeddings=True, show_progress_bar=False).tolist())
-    return results
-
-# ── kolegal 임베딩 ────────────────────────────────────────────────────────────
-
-def init_kolegal():
-    """KoLegal 모델을 로딩한다."""
-    from sentence_transformers import SentenceTransformer
-
-    print(f"  KoLegal 모델 로딩 중: {KOLEGAL_MODEL}")
-    model = SentenceTransformer(KOLEGAL_MODEL)
-    print("  KoLegal 모델 로딩 완료")
-
-    return model
-
-def embed_kolegal(texts: list[str], model) -> list[list[float]]:
-    """전체 텍스트 목록을 KoLegal로 배치 임베딩한다."""
-    results = []
-    total = len(texts)
-
-    for i in range(0, total, KOLEGAL_BATCH_SIZE):
-        batch = texts[i: i + KOLEGAL_BATCH_SIZE]
-
-        print(
-            f"    KoLegal 배치 "
-            f"{i // KOLEGAL_BATCH_SIZE + 1} / "
-            f"{(total - 1) // KOLEGAL_BATCH_SIZE + 1} "
-            f"({len(batch)}건)"
-        )
-
-        vectors = model.encode(
-            batch,
-            show_progress_bar=False,
-            normalize_embeddings=True,
-        )
-
-        results.extend(vectors.tolist())
-
-    return results
-
 # ── 실행부 ────────────────────────────────────────────────────────────
 
 def run(
-    input_path: str | Path = INPUT_PATH,
+    input_child_path: str | Path = INPUT_CHILD_PATH,
+    input_parent_path: str | Path = INPUT_PARENT_PATH,
     output_path: str | Path = OUTPUT_PATH,
-    use_vertex: bool = True,
-    use_kure: bool = True,
-    use_e5: bool = True,
-    use_kolegal: bool = True,
 ) -> None:
-    """child CSV에 임베딩 컬럼을 추가한다.
-    
-    각 모델별로 컬럼이 이미 존재하면 해당 모델 임베딩을 건너뛴다.
+    """child CSV에 parent_text 컬럼 및 임베딩 컬럼을 추가한다.
+
+    - law_child와 law_parent를 article_key로 JOIN
+    - 임베딩 텍스트: parent_text + child_text (prefix 방식)
+    - embed_vertex 컬럼이 이미 존재하면 임베딩을 건너뜀
     """
-    input_path = Path(input_path)
+    input_child_path = Path(input_child_path)
+    input_parent_path = Path(input_parent_path)
     output_path = Path(output_path)
 
-    print(f"[법령 embedder] 입력: {input_path}")
+    print(f"[법령 embedder] child 입력: {input_child_path}")
+    print(f"[법령 embedder] parent 입력: {input_parent_path}")
     print(f"[법령 embedder] 출력: {output_path}")
 
-    df = pd.read_csv(input_path, dtype={"paragraph_no": str})
-    texts = df["child_text"].fillna("").tolist()
-    print(f"  총 {len(texts)}건 로드 완료")
+    # child, parent 로드
+    df_child = pd.read_csv(input_child_path, dtype={"paragraph_no": str})
+    df_parent = pd.read_csv(input_parent_path)[["article_key", "parent_text"]]
+    print(f"  child {len(df_child)}건, parent {len(df_parent)}건 로드 완료")
 
-    step = 1
+    # article_key로 JOIN하여 parent_text 추가
+    df = df_child.merge(df_parent, on="article_key", how="left")
 
-    if use_vertex:
-        if "embed_vertex" in df.columns:
-            print(f"\n[{step}] embed_vertex 컬럼 존재 → 건너뜀")
-        else:
-            print(f"\n[{step}] Vertex AI 임베딩 시작 (모델: {VERTEX_MODEL})")
-            init_vertex()
-            vectors = embed_vertex(texts)
-            df["embed_vertex"] = [json.dumps(v) for v in vectors]
-            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
-        step += 1
+    # JOIN 결과 확인
+    missing = df["parent_text"].isna().sum()
+    if missing > 0:
+        print(f"  경고: parent_text 매핑 실패 {missing}건 (article_key 불일치)")
 
-    if use_kure:
-        if "embed_kure" in df.columns:
-            print(f"\n[{step}] embed_kure 컬럼 존재 → 건너뜀")
-        else:
-            print(f"\n[{step}] KURE 임베딩 시작 (모델: {KURE_MODEL})")
-            kure_model = init_kure()
-            vectors = embed_kure(texts, kure_model)
-            df["embed_kure"] = [json.dumps(v) for v in vectors]
-            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
-        step += 1
+    print(f"\n[1] Vertex AI 임베딩 시작 (모델: {VERTEX_MODEL})")
 
-    if use_e5:
-        if "embed_e5" in df.columns:
-            print(f"\n[{step}] embed_e5 컬럼 존재 → 건너뜀")
-        else:
-            print(f"\n[{step}] E5 임베딩 시작 (모델: {E5_MODEL})")
-            e5_model = init_e5()
-            vectors = embed_e5(texts, e5_model)
-            df["embed_e5"] = [json.dumps(v) for v in vectors]
-            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
-        step += 1
+    if "embed_vertex" in df.columns:
+        print("  embed_vertex 컬럼 존재 → 건너뜀")
+    else:
+        init_vertex()
 
-    if use_kolegal:
-        if "embed_kolegal" in df.columns:
-            print(f"\n[{step}] embed_kolegal 컬럼 존재 → 건너뜀")
-        else:
-            print(f"\n[{step}] KoLegal 임베딩 시작 (모델: {KOLEGAL_MODEL})")
-            kolegal_model = init_kolegal()
-            vectors = embed_kolegal(texts, kolegal_model)
-            df["embed_kolegal"] = [json.dumps(v) for v in vectors]
-            print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
-        step += 1
-        
+        # 임베딩 텍스트: parent_text를 prefix로 붙인 뒤 child_text 결합
+        def build_embed_text(row) -> str:
+            parent = row["parent_text"] if pd.notna(row["parent_text"]) else ""
+            child = row["child_text"] if pd.notna(row["child_text"]) else ""
+            if parent:
+                return f"{parent}\n\n{child}"
+            return child
+
+        embed_texts = df.apply(build_embed_text, axis=1).tolist()
+
+        vectors = embed_vertex(embed_texts)
+        df["embed_vertex"] = [json.dumps(v) for v in vectors]
+        print(f"  완료: {len(vectors)}건, 차원: {len(vectors[0])}")
+
+    # 저장할 컬럼 순서 정의
+    keep_cols = [
+        "clause_key",
+        "article_key",
+        "law_name",
+        "article_no",
+        "paragraph_no",
+        "child_text",
+        "parent_text",
+        "embed_vertex",
+    ]
+
+    existing_cols = [c for c in keep_cols if c in df.columns]
+    df = df[existing_cols]
+
     df.to_csv(output_path, index=False, encoding="utf-8-sig", quoting=csv.QUOTE_ALL)
     print(f"\n저장 완료: {output_path}")
-    
     
 if __name__ == "__main__":
     run()
