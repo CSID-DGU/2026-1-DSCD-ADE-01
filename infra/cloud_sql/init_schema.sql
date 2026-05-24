@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS law_child (
     paragraph_no INTEGER,
     child_text TEXT NOT NULL,
     embed_vertex vector(3072),
-    embed_kure vector(1024)
+    embed_kure vector(1024),
+    embed_e5 vector(1024)
 );
 
 CREATE INDEX IF NOT EXISTS idx_law_parent_law_article
@@ -57,7 +58,8 @@ CREATE TABLE IF NOT EXISTS case_law (
     referenced_case TEXT,
     case_detail TEXT,
     embed_vertex vector(3072),
-    embed_kure vector(1024)
+    embed_kure vector(1024),
+    embed_e5 vector(1024)
 );
 
 ALTER TABLE law_child
@@ -71,6 +73,12 @@ ALTER TABLE case_law
 
 ALTER TABLE case_law
     ADD COLUMN IF NOT EXISTS embed_kure vector(1024);
+
+ALTER TABLE law_child
+    ADD COLUMN IF NOT EXISTS embed_e5 vector(1024);
+
+ALTER TABLE case_law
+    ADD COLUMN IF NOT EXISTS embed_e5 vector(1024);
 
 CREATE INDEX IF NOT EXISTS idx_case_law_case_number
     ON case_law (case_number);

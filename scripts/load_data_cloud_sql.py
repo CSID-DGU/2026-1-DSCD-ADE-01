@@ -60,6 +60,7 @@ EXPECTED_CHILD_COLUMNS = [
     "child_text",
     "embed_vertex",
     "embed_kure",
+    "embed_e5",
 ]
 
 EXPECTED_CASE_LAW_COLUMNS = [
@@ -78,6 +79,7 @@ EXPECTED_CASE_LAW_COLUMNS = [
     "case_detail",
     "embed_vertex",
     "embed_kure",
+    "embed_e5",
 ]
 
 PARENT_DB_COLUMNS = [
@@ -105,6 +107,7 @@ CHILD_DB_COLUMNS = [
     "child_text",
     "embed_vertex",
     "embed_kure",
+    "embed_e5",
 ]
 
 CASE_LAW_DB_COLUMNS = [
@@ -123,6 +126,7 @@ CASE_LAW_DB_COLUMNS = [
     "case_detail",
     "embed_vertex",
     "embed_kure",
+    "embed_e5",
 ]
 
 REFERENCED_LAW_DB_COLUMNS = [
@@ -455,6 +459,7 @@ def validate_law_rows(
         to_nullable_int(row["paragraph_no"])
         parse_pgvector(row["embed_vertex"])
         parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
 
 def validate_child_rows_stream(
@@ -482,6 +487,7 @@ def validate_child_rows_stream(
         to_nullable_int(row["paragraph_no"])
         parse_pgvector(row["embed_vertex"])
         parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
     if duplicate_clause_keys:
         raise ValueError(f"duplicate clause_key: {duplicate_clause_keys[:5]}")
@@ -503,6 +509,7 @@ def validate_case_law_rows(case_rows: list[dict[str, str]]) -> None:
         to_nullable_int(row["court_type_code"])
         parse_pgvector(row["embed_vertex"])
         parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
 
 def map_parent_row(row: dict[str, str]) -> dict[str, Any]:
@@ -533,6 +540,7 @@ def map_child_row(row: dict[str, str], *, parent_id: int) -> dict[str, Any]:
         "child_text": row["child_text"],
         "embed_vertex": parse_pgvector(row["embed_vertex"]),
         "embed_kure": parse_pgvector(row["embed_kure"], expected_dimensions=1024),
+        "embed_e5": parse_pgvector(row["embed_e5"], expected_dimensions=1024),
     }
 
 
@@ -552,10 +560,8 @@ def map_case_law_row(row: dict[str, str]) -> dict[str, Any]:
         "referenced_case": to_nullable_text(row["referenced_case"]),
         "case_detail": to_nullable_text(row["case_detail"]),
         "embed_vertex": parse_pgvector(row["embed_vertex"]),
-        "embed_kure": parse_pgvector(
-            row["embed_kure"],
-            expected_dimensions=1024,
-        ),
+        "embed_kure": parse_pgvector(row["embed_kure"], expected_dimensions=1024),
+        "embed_e5": parse_pgvector(row["embed_e5"], expected_dimensions=1024),
     }
 
 
