@@ -38,6 +38,56 @@ def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
     return expanded_queries
 
 
+def expand_case_queries_with_llm_multi(case: dict[str, Any]) -> list[dict[str, Any]]:
+    """법령/판례 전용 QE를 clause별로 병렬 생성한다 (LLM 2회 병렬 호출/clause).
+
+    각 expanded_query에 target_type("law" | "precedent")을 부여해
+    retrieval 단계에서 해당 corpus에만 검색하도록 한다.
+    wall time은 단일 호출과 거의 동일하고 API 쿼터는 2배 사용한다.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    from pipeline.retrieval.query_expansion.query_expansion import expand_clause
+    from pipeline.retrieval.query_expansion.query_expansion_prompt import (
+        build_user_prompt_law,
+        build_user_prompt_precedent,
+    )
+
+    targets: list[tuple[str, Any]] = [
+        ("law", build_user_prompt_law),
+        ("precedent", build_user_prompt_precedent),
+    ]
+
+    expanded_queries: list[dict[str, Any]] = []
+    for clause_index, clause in enumerate(case["clauses"]):
+        results_by_target: dict[str, Any] = {}
+
+        def _expand(target_type: str, build_prompt: Any) -> tuple[str, Any]:
+            return target_type, expand_clause(clause, user_prompt=build_prompt(clause))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {pool.submit(_expand, t, p): t for t, p in targets}
+            for future in as_completed(futures):
+                target_type, expansion = future.result()
+                results_by_target[target_type] = expansion
+
+        for target_type, _ in targets:
+            expansion = results_by_target[target_type]
+            expanded_queries.append(
+                {
+                    "clause_index": clause_index,
+                    "clause": clause,
+                    "query": clause,
+                    "target_type": target_type,
+                    "expansion_query": expansion.expansion_query,
+                    "keywords": expansion.keywords,
+                    "expansion": expansion.model_dump(),
+                    "retrieval_payload": build_retrieval_payload(expansion, clause_text=clause),
+                }
+            )
+    return expanded_queries
+
+
 def expand_case_queries(case: dict[str, Any]) -> list[dict[str, Any]]:
     """Build deterministic query expansion payloads for a case's clauses."""
     expanded_queries: list[dict[str, Any]] = []

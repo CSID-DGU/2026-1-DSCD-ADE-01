@@ -46,6 +46,7 @@ try:
     from pipeline.retrieval.evaluation_retrieval import (
         collect_case_documents,
         expand_case_queries_with_llm,
+        expand_case_queries_with_llm_multi,
         inspect_retrieved_documents,
     )
     from rank_bm25 import BM25Okapi
@@ -61,8 +62,7 @@ RESULTS_DIR = Path(__file__).resolve().parent / "results"
 DEFAULT_SEMANTIC_EMBED_COL = "embed_vertex"
 LAW_SEMANTIC_KEEP_COLS = ["clause_key", "child_text"]
 PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
-# 모든 임베딩 모델에 공통으로 존재하는 판례만 사용 (공정 비교)
-PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL AND embed_kure IS NOT NULL AND embed_e5 IS NOT NULL"
+PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL"
 
 # ── embedding 프로파일 ──────────────────────────────────────────────────────
 SEMANTIC_EMBED_CONFIGS = {
@@ -70,16 +70,6 @@ SEMANTIC_EMBED_CONFIGS = {
         "query_embed_col": "embed_vertex",
         "law_embed_col": "embed_vertex",
         "precedent_embed_col": "embed_vertex",
-    },
-    "embed_kure": {
-        "query_embed_col": "embed_kure",
-        "law_embed_col": "embed_kure",
-        "precedent_embed_col": "embed_kure",
-    },
-    "embed_e5": {
-        "query_embed_col": "embed_e5",
-        "law_embed_col": "embed_e5",
-        "precedent_embed_col": "embed_e5",
     },
 }
 DEFAULT_SEMANTIC_EMBED_COLS = tuple(SEMANTIC_EMBED_CONFIGS)
@@ -96,8 +86,8 @@ RERANKERS = ["alpha_hybrid"]
 ALPHA_LAW  = 0.2   # 법령: BM25 20% + Dense 80%
 ALPHA_PREC = 0.6   # 판례: BM25 60% + Dense 40%
 
-# 병렬 처리: embed_col 수만큼 동시 실행 (vertex/kure/e5)
-EMBED_WORKERS = 3
+# 병렬 처리: embed_col 수만큼 동시 실행
+EMBED_WORKERS = 1
 # 케이스 단위 병렬 처리 (API 호출 제한 고려해 보수적으로 설정)
 CASE_WORKERS = 3
 # QE API 동시 호출 제한 (WinError 10014 방지: Windows 소켓 버퍼 고갈 예방)
@@ -483,7 +473,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SEMANTIC_EMBED_COLS_ARG,
         help=(
             "Comma-separated semantic embedding profiles to evaluate. "
-            "Default: embed_vertex,embed_kure,embed_e5"
+            "Default: embed_vertex"
         ),
     )
     parser.add_argument(
@@ -521,6 +511,15 @@ def parse_args() -> argparse.Namespace:
             "이전 실행 결과 JSON 경로 (evaluation/results/ 아래 파일). "
             "지정 시 Query Expansion LLM 호출을 스킵하고 캐시된 expanded_queries를 재사용합니다. "
             "캐시에 없는 case_id는 LLM을 호출합니다."
+        ),
+    )
+    parser.add_argument(
+        "--multi-qe",
+        action="store_true",
+        default=False,
+        help=(
+            "법령/판례 전용 QE를 clause별로 병렬 생성합니다 (LLM 2회 병렬 호출/clause). "
+            "--qe-cache와 함께 쓸 수 없습니다."
         ),
     )
     return parser.parse_args()
@@ -813,24 +812,27 @@ def run_bm25_retrieval(
     results: list[dict[str, Any]] = []
     for query in expanded_queries:
         query_tokens = build_query_tokens(query["retrieval_payload"]["bm25_keywords"])
-        results.extend(
-            bm25_results_for_documents(
-                query=query,
-                query_tokens=query_tokens,
-                documents=law_documents,
-                bm25=law_bm25,
-                top_k=top_k,
+        target = query.get("target_type", "both")
+        if target in ("law", "both"):
+            results.extend(
+                bm25_results_for_documents(
+                    query=query,
+                    query_tokens=query_tokens,
+                    documents=law_documents,
+                    bm25=law_bm25,
+                    top_k=top_k,
+                )
             )
-        )
-        results.extend(
-            bm25_results_for_documents(
-                query=query,
-                query_tokens=query_tokens,
-                documents=precedent_documents,
-                bm25=precedent_bm25,
-                top_k=top_k,
+        if target in ("precedent", "both"):
+            results.extend(
+                bm25_results_for_documents(
+                    query=query,
+                    query_tokens=query_tokens,
+                    documents=precedent_documents,
+                    bm25=precedent_bm25,
+                    top_k=top_k,
+                )
             )
-        )
     return results
 
 
@@ -1004,28 +1006,31 @@ def run_semantic_retrieval_for_embed_col(
     for query in expanded_queries:
         dense_query = query["retrieval_payload"]["dense_query"]
         query_vec = dense_retrieval.embed_query(dense_query, query_embed_col)
-        results.extend(
-            semantic_results_from_rows(
-                query=query,
-                rows=dense_retrieval.search_similar(query_vec, law_chunks, law_embed_col, top_k),
-                source_type="law",
-                semantic_embed_col=semantic_embed_col,
-                query_embed_col=query_embed_col,
-                document_embed_col=law_embed_col,
+        target = query.get("target_type", "both")
+        if target in ("law", "both"):
+            results.extend(
+                semantic_results_from_rows(
+                    query=query,
+                    rows=dense_retrieval.search_similar(query_vec, law_chunks, law_embed_col, top_k),
+                    source_type="law",
+                    semantic_embed_col=semantic_embed_col,
+                    query_embed_col=query_embed_col,
+                    document_embed_col=law_embed_col,
+                )
             )
-        )
-        results.extend(
-            semantic_results_from_rows(
-                query=query,
-                rows=dense_retrieval.search_similar(
-                    query_vec, precedent_chunks, precedent_embed_col, top_k
-                ),
-                source_type="precedent",
-                semantic_embed_col=semantic_embed_col,
-                query_embed_col=query_embed_col,
-                document_embed_col=precedent_embed_col,
+        if target in ("precedent", "both"):
+            results.extend(
+                semantic_results_from_rows(
+                    query=query,
+                    rows=dense_retrieval.search_similar(
+                        query_vec, precedent_chunks, precedent_embed_col, top_k
+                    ),
+                    source_type="precedent",
+                    semantic_embed_col=semantic_embed_col,
+                    query_embed_col=query_embed_col,
+                    document_embed_col=precedent_embed_col,
+                )
             )
-        )
     return results
 
 
@@ -2615,12 +2620,16 @@ def run(
     alpha_law: float = ALPHA_LAW,
     alpha_prec: float = ALPHA_PREC,
     qe_cache_path: Path | None = None,
+    multi_qe: bool = False,
 ) -> Path:
     assert_real_pipeline_imports_available()
     if qe_cache_path is not None:
         cache = load_qe_cache(qe_cache_path)
         expand_fn = make_cached_expand_fn(cache)
         log_progress(f"qe_cache_loaded path={qe_cache_path} entries={len(cache)}")
+    elif multi_qe:
+        expand_fn = expand_case_queries_with_llm_multi
+        log_progress("qe_mode=multi (law+precedent parallel)")
     else:
         expand_fn = expand_case_queries_with_llm
     dataset = load_dataset(input_path)
@@ -2660,6 +2669,7 @@ def main() -> int:
             alpha_law=args.alpha_law,
             alpha_prec=args.alpha_prec,
             qe_cache_path=qe_cache_path,
+            multi_qe=args.multi_qe,
         )
     except PipelineImportError as error:
         print(f"error: {error}", file=sys.stderr)
