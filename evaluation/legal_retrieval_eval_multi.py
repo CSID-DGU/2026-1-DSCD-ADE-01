@@ -59,7 +59,13 @@ REQUIRED_CASE_FIELDS = ("case_id", "clauses", "law_references", "precedent_refer
 DEFAULT_INPUT_PATH = PROJECT_ROOT / "evaluation" / "eval_set.json"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 DEFAULT_SEMANTIC_EMBED_COL = "embed_vertex"
-LAW_SEMANTIC_KEEP_COLS = ["clause_key", "child_text"]
+LAW_SEMANTIC_KEEP_COLS = [
+    "clause_key",
+    "law_name",
+    "article_no",
+    "paragraph_no",
+    "child_text",
+]
 PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
 # 모든 임베딩 모델에 공통으로 존재하는 판례만 사용 (공정 비교)
 PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL AND embed_kure IS NOT NULL AND embed_e5 IS NOT NULL"
@@ -101,7 +107,7 @@ EMBED_WORKERS = 3
 # 케이스 단위 병렬 처리 (API 호출 제한 고려해 보수적으로 설정)
 CASE_WORKERS = 3
 # QE API 동시 호출 제한 (WinError 10014 방지: Windows 소켓 버퍼 고갈 예방)
-_QE_SEMAPHORE = threading.Semaphore(2)
+_QE_SEMAPHORE = threading.Semaphore(3)
 
 
 # ── 설정 헬퍼 ─────────────────────────────────────────────────────────────
@@ -1925,6 +1931,8 @@ def law_match_values(result: dict[str, Any]) -> list[Any]:
         result.get("clause_key"),
         result.get("law_name"),
         result.get("article_key"),
+        result.get("article_no"),
+        result.get("paragraph_no"),
         result.get("result_id"),
     ]
     values.extend(combined_law_values(result))
@@ -1934,6 +1942,8 @@ def law_match_values(result: dict[str, Any]) -> list[Any]:
             metadata.get("clause_key"),
             metadata.get("law_name"),
             metadata.get("article_key"),
+            metadata.get("article_no"),
+            metadata.get("paragraph_no"),
         ])
         values.extend(combined_law_values(metadata))
     return values
@@ -1955,10 +1965,83 @@ def precedent_match_values(result: dict[str, Any]) -> list[Any]:
 
 def combined_law_values(item: dict[str, Any]) -> list[str]:
     law_name = item.get("law_name")
+    clause_key = item.get("clause_key")
     article_key = item.get("article_key")
-    if not law_name or not article_key:
+    article_no = item.get("article_no")
+    paragraph_no = item.get("paragraph_no")
+
+    if not law_name and isinstance(clause_key, str) and "_" in clause_key:
+        law_name = clause_key.split("_", 1)[0]
+    if not law_name:
         return []
-    return [f"{law_name}_{article_key}", f"{law_name} {article_key}"]
+
+    forms: list[str] = []
+
+    compact_key = article_key
+    if not compact_key and isinstance(clause_key, str) and "_" in clause_key:
+        compact_key = clause_key.split("_", 1)[1]
+    if compact_key:
+        compact_key = str(compact_key).strip()
+        if compact_key:
+            forms.extend(
+                [
+                    f"{law_name}_{compact_key}",
+                    f"{law_name} {compact_key}",
+                    f"{law_name}{compact_key}",
+                ]
+            )
+
+    korean_key = article_key_from_numbers(article_no, paragraph_no)
+    if korean_key:
+        forms.extend(
+            [
+                f"{law_name}_{korean_key}",
+                f"{law_name} {korean_key}",
+                f"{law_name}{korean_key}",
+            ]
+        )
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for form in forms:
+        normalized = form.strip()
+        if not normalized or normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return deduped
+
+
+def article_key_from_numbers(article_no: Any, paragraph_no: Any) -> str:
+    article_text = normalize_article_no(article_no)
+    if not article_text:
+        return ""
+    paragraph_text = normalize_paragraph_no(paragraph_no)
+    return f"{article_text}_{paragraph_text}" if paragraph_text else article_text
+
+
+def normalize_article_no(article_no: Any) -> str:
+    if article_no is None:
+        return ""
+    text_value = str(article_no).strip()
+    if not text_value:
+        return ""
+    if "조" in text_value:
+        return text_value
+    return f"제{text_value}조"
+
+
+def normalize_paragraph_no(paragraph_no: Any) -> str:
+    if paragraph_no is None:
+        return ""
+    text_value = str(paragraph_no).strip()
+    if not text_value:
+        return ""
+    if text_value in {"0", "0.0", "nan", "None"}:
+        return ""
+    if "항" in text_value:
+        return text_value
+    return f"제{text_value}항"
 
 
 def reference_matches_result(reference: Any, result_values: list[str]) -> bool:

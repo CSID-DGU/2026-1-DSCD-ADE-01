@@ -37,7 +37,7 @@ TOP_K = 20
 RRF_K = 60
 RECALL_K_VALUES = [1, 3, 5, 10, 20]
 EMBED_COLS = ["embed_vertex", "embed_kure"]
-LAW_KEEP_COLS = ["clause_key", "child_text"]
+LAW_KEEP_COLS = ["clause_key", "law_name", "article_no", "paragraph_no", "child_text"]
 PREC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
 
 
@@ -82,7 +82,7 @@ def load_corpus() -> dict:
 def retrieve_clause(clause: str, corpus: dict) -> dict:
     """단일 특약에 대해 Query Expansion → BM25 → Dense → RRF를 실행한다."""
     # Query Expansion
-    expansion = expand_clause(clause)
+    expansion = expand_clause(clause, overfit_mode=True)
     payload = build_retrieval_payload(expansion, clause_text=clause)
     log.info("    QE keywords: %s", payload["bm25_keywords"])
 

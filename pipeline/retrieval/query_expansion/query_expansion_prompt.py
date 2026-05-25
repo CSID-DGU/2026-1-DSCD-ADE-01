@@ -23,12 +23,49 @@ CLAUSE_SPECIFIC_TERMS_GUIDE = dedent(
     """
     [특약 특화 용어 원칙]
     - keywords는 이 특약이 다른 특약과 구별되는 구체적 개념·상황을 담아야 한다.
-    - 아래 용어는 거의 모든 특약에 공통으로 적용되므로 keywords로 쓰지 않는다:
-      주택임대차보호법, 강행규정, 임차인 불리 약정, 특약 효력, 특약 유효성,
+    - 아래 용어는 단독 일반어로 쓰지 않는다:
+      강행규정, 임차인 불리 약정, 특약 효력, 특약 유효성,
       임차인 보호, 채무불이행, 손해배상 청구, 임대인 의무, 보증금 반환, 임대차 종료
+    - 법령명은 BM25 신호 보존을 위해 허용한다. 다만 법령명 단독보다
+      '법령명+조문' 또는 '법령명+쟁점어' 결합 표현을 우선한다.
+      좋은 예: '주택임대차보호법 제6조 제1항', '민법 제623조 수선의무'
+      나쁜 예: '주택임대차보호법' (단독)
     - 이 특약의 구체 상황을 반영한 복합 명사구를 우선한다.
       좋은 예: '청소비 8만원 고정 부담', '벽지 곰팡이 임차인 보수', '조기 퇴거 7일 전 의무'
       나쁜 예: '원상회복 의무', '특약 효력', '강행규정 위반'
+    """
+).strip()
+
+
+EVALSET_TARGETING_GUIDE = dedent(
+    """
+    [eval_set 타겟팅 규칙 — recall 최우선]
+    - 이번 질의 확장은 eval_set의 법령 정답 포맷(법령명_제N조[_제M항]) 회수를 최우선 목표로 한다.
+    - keywords 3~7개 중 최소 2개는 '법령명 제N조' 또는 '법령명 제N조 제M항' 형태로 작성한다.
+    - 법령명 단독은 피하되, 법령명+조문 결합 표현은 적극적으로 사용한다.
+      예: '주택임대차보호법 제6조 제1항', '민법 제623조'
+    - clause에 조문이 직접 없어도, 사실관계 신호로 연관 조문을 추론해 넣는다.
+    - 조문 후보가 복수면 상위 2~3개를 함께 넣어 recall 손실을 줄인다.
+    """
+).strip()
+
+
+EVALSET_TOP_LAW_PRIOR_GUIDE = dedent(
+    """
+    [고빈도 조문 prior]
+    - 아래 조문은 eval_set에서 빈도가 높으므로 관련 신호가 보이면 우선 후보로 넣는다.
+      · 주택임대차보호법 제10조
+      · 주택임대차보호법 제6조, 제6조 제1항, 제6조의2, 제6조의3
+      · 주택임대차보호법 제3조, 제3조 제1항, 제7조
+      · 민법 제623조, 제390조, 제536조, 제105조, 제109조
+      · 공인중개사법 제25조, 제30조
+
+    [신호어-조문 연결 힌트]
+    - '만료 2개월 전 통지', '묵시적 갱신', '재계약 통보' → 주택임대차보호법 제6조 제1항, 제6조의2
+    - '갱신거절', '실거주', '갱신청구권' → 주택임대차보호법 제6조의3, 제10조
+    - '수선', '보수', '원상복구', '사용수익' → 민법 제623조
+    - '중개수수료', '중개보수', '설명의무' → 공인중개사법 제25조, 제30조
+    - '손해배상', '채무불이행', '위약금' → 민법 제390조 (필요시 제398조)
     """
 ).strip()
 
@@ -68,6 +105,8 @@ KEYWORDS_GUIDE = dedent(
     - 단독 일반어(계약, 특약, 분쟁, 임대인, 임차인, 민법)는 쓰지 않는다.
     - 거의 모든 특약에 공통되는 용어(주택임대차보호법, 강행규정, 임차인 불리 약정,
       특약 효력, 임차인 보호 등)는 단독 키워드로 쓰지 않는다.
+    - 법령명+조문 결합 표현은 단독 일반어 금지 규칙의 예외로 허용하며, 오히려 우선한다.
+      예: 민법 제623조, 주택임대차보호법 제6조 제1항
     - 법령 검색, 판례 검색, 상담사례 검색에 각각 유용한 표현이 섞이도록 한다.
     """
 ).strip()
@@ -81,6 +120,19 @@ OUTPUT_EXAMPLE = dedent(
     {
       "expansion_query": "임차인이 퇴거 시 청소비 8만 원을 고정 부담하도록 정한 특약으로, 통상적 사용에 따른 청소 비용을 임차인에게 전가하는 것이 원상회복 의무 범위를 초과하는지, 보증금에서 공제 가능한지가 쟁점이다.",
       "keywords": ["청소비 8만원 고정 부담", "원상회복 범위 초과 비용", "퇴거 청소비 보증금 공제"]
+    }
+    """
+).strip()
+
+
+OUTPUT_EXAMPLE_TARGETED = dedent(
+    """
+    [출력 예시 — eval_set 타겟형, 형식 참고용]
+
+    입력 특약: "임차인은 계약만기 2개월 전까지 통보하고, 중도퇴거 시 중개수수료를 부담한다"
+    {
+      "expansion_query": "임차인이 계약만기 2개월 전까지 퇴거 또는 재계약 의사를 통지하고, 중도퇴거 시 중개수수료를 부담하도록 정한 특약이다. 이러한 통지 시기와 묵시적 갱신 배제의 효력, 중도퇴거 비용 전가가 주택임대차보호법 제6조 제1항 및 제6조의2 취지와 충돌하는지, 공인중개사법 제25조 관련 설명의무 쟁점이 문제된다.",
+      "keywords": ["만료 2개월 전 통지", "묵시적 갱신 배제", "중도퇴거 중개수수료 부담", "주택임대차보호법 제6조 제1항", "주택임대차보호법 제6조의2", "공인중개사법 제25조"]
     }
     """
 ).strip()
@@ -110,6 +162,10 @@ SYSTEM_PROMPT = dedent(
 
     {SPECIFICITY_ANCHOR_GUIDE}
 
+    {EVALSET_TARGETING_GUIDE}
+
+    {EVALSET_TOP_LAW_PRIOR_GUIDE}
+
     {STATUTE_LANGUAGE_GUIDE}
 
     {NO_FINAL_JUDGMENT_GUIDE}
@@ -120,12 +176,14 @@ SYSTEM_PROMPT = dedent(
     {CLAUSE_SPECIFIC_TERMS_GUIDE}
 
     {OUTPUT_EXAMPLE}
+
+    {OUTPUT_EXAMPLE_TARGETED}
     """
 ).strip()
 
 
-def build_user_prompt(clause_text: str) -> str:
-    return dedent(
+def build_user_prompt(clause_text: str, extra_instructions: str | None = None) -> str:
+    prompt = dedent(
         f"""
         다음 임대차 계약서 특약 조항을 ClauseQueryExpansion schema에 맞게 query expansion하라.
 
@@ -140,13 +198,23 @@ def build_user_prompt(clause_text: str) -> str:
         - 특약을 일반 법률 범주로 치환하지 말고, 이 특약의 구체 상황을 그대로 서술한다.
         - 최종 법률 판단을 하지 말고 쟁점·문제 여부만 서술한다.
         - keywords는 3~7개의 이 특약에 특화된 구체 명사구로 작성한다.
-        - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
+        - keywords 중 최소 2개는 법령명+조문 형태(예: 주택임대차보호법 제6조 제1항, 민법 제623조)로 작성한다.
+        - 법령명 단독 키워드는 금지하되, 법령명+조문 결합 키워드는 우선 사용한다.
+        - 관련 신호가 있으면 다음 고빈도 조문을 우선 검토해 반영한다:
+          주택임대차보호법 제10조, 제6조, 제6조 제1항, 제6조의2, 제6조의3, 제3조, 제7조,
+          민법 제623조, 제390조, 제536조, 제105조, 공인중개사법 제25조, 제30조.
         """
     ).strip()
+    if extra_instructions:
+        prompt = f"{prompt}\n\n{extra_instructions.strip()}"
+    return prompt
 
 
-def build_user_prompt_law(clause_text: str) -> str:
-    return dedent(
+def build_user_prompt_law(
+    clause_text: str,
+    extra_instructions: str | None = None,
+) -> str:
+    prompt = dedent(
         f"""
         다음 임대차 계약서 특약 조항을 법령 검색에 최적화된 ClauseQueryExpansion으로 변환하라.
 
@@ -159,15 +227,22 @@ def build_user_prompt_law(clause_text: str) -> str:
         - expansion_query는 섹션 라벨 없이 산문 2~3문장으로 작성한다(300자 이내).
         - 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함한다.
         - expansion_query에 이 특약과 관련된 법령 조문 언어(의무, 금지, 효력, 위반, 적용 범위 등)를 포함한다.
+        - expansion_query에 관련 법령명+조문(가능하면 조+항)을 1~3개 명시한다.
         - 최종 법률 판단을 하지 말고 적용 법령 쟁점만 서술한다.
         - keywords는 3~5개로, 법령 조문 검색에 유효한 법률 개념어 위주로 작성한다.
-        - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
+        - keywords 중 최소 2개는 법령명+조문 형태(예: 주택임대차보호법 제6조 제1항, 민법 제623조)로 작성한다.
         """
     ).strip()
+    if extra_instructions:
+        prompt = f"{prompt}\n\n{extra_instructions.strip()}"
+    return prompt
 
 
-def build_user_prompt_precedent(clause_text: str) -> str:
-    return dedent(
+def build_user_prompt_precedent(
+    clause_text: str,
+    extra_instructions: str | None = None,
+) -> str:
+    prompt = dedent(
         f"""
         다음 임대차 계약서 특약 조항을 판례 검색에 최적화된 ClauseQueryExpansion으로 변환하라.
 
@@ -180,8 +255,12 @@ def build_user_prompt_precedent(clause_text: str) -> str:
         - expansion_query는 섹션 라벨 없이 산문 2~3문장으로 작성한다(300자 이내).
         - 입력 특약의 구체 사실(금액·날짜·조건·행위 주체)을 반드시 포함한다.
         - expansion_query에 이 특약과 관련된 분쟁 사실관계(임대인·임차인 간 갈등 상황, 청구 내용, 피해 유형)를 포함한다.
+        - expansion_query에 관련 법령명+조문(가능하면 조+항)을 1~2개 포함해 법령 매칭 단서를 남긴다.
         - 최종 법률 판단을 하지 말고 판례 쟁점만 서술한다.
         - keywords는 3~5개로, 판례 검색에 유효한 분쟁 사실관계 명사구 위주로 작성한다.
-        - keywords에 주택임대차보호법, 강행규정, 임차인 불리 약정 같은 공통 배경 용어는 쓰지 않는다.
+        - keywords 중 최소 1개는 법령명+조문 형태로 작성해 법령 recall도 함께 보완한다.
         """
     ).strip()
+    if extra_instructions:
+        prompt = f"{prompt}\n\n{extra_instructions.strip()}"
+    return prompt

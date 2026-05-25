@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -12,6 +13,11 @@ from pipeline.retrieval.query_expansion.retrieval_adapter import build_retrieval
 TOKEN_PATTERN = re.compile(r"[0-9A-Za-z가-힣]+")
 
 
+def _is_multi_query_enabled() -> bool:
+    value = os.getenv("QE_MULTI_QUERY_MODE", "").strip().lower()
+    return value in {"1", "true", "yes", "on", "multi"}
+
+
 def tokenize_for_evaluation(text: str) -> list[str]:
     """Return simple normalized tokens without requiring model dependencies."""
     return [token.lower() for token in TOKEN_PATTERN.findall(text)]
@@ -20,21 +26,43 @@ def tokenize_for_evaluation(text: str) -> list[str]:
 def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
     """Build query expansion payloads for a case's clauses by calling the actual LLM."""
     from pipeline.retrieval.query_expansion.query_expansion import expand_clause
+    from pipeline.retrieval.query_expansion.query_expansion_prompt import (
+        build_user_prompt_law,
+        build_user_prompt_precedent,
+    )
 
     expanded_queries: list[dict[str, Any]] = []
+    multi_query_enabled = _is_multi_query_enabled()
     for clause_index, clause in enumerate(case["clauses"]):
-        expansion = expand_clause(clause)
-        expanded_queries.append(
-            {
-                "clause_index": clause_index,
-                "clause": clause,
-                "query": clause,
-                "expansion_query": expansion.expansion_query,
-                "keywords": expansion.keywords,
-                "expansion": expansion.model_dump(),
-                "retrieval_payload": build_retrieval_payload(expansion, clause_text=clause),
-            }
-        )
+        if multi_query_enabled:
+            query_specs = [
+                ("law", build_user_prompt_law(clause)),
+                ("precedent", build_user_prompt_precedent(clause)),
+            ]
+        else:
+            query_specs = [("default", None)]
+        for query_type, prompt in query_specs:
+            expansion = (
+                expand_clause(clause, overfit_mode=True)
+                if prompt is None
+                else expand_clause(
+                    clause,
+                    user_prompt=prompt,
+                    overfit_mode=True,
+                )
+            )
+            expanded_queries.append(
+                {
+                    "clause_index": clause_index,
+                    "clause": clause,
+                    "query": clause,
+                    "query_type": query_type,
+                    "expansion_query": expansion.expansion_query,
+                    "keywords": expansion.keywords,
+                    "expansion": expansion.model_dump(),
+                    "retrieval_payload": build_retrieval_payload(expansion, clause_text=clause),
+                }
+            )
     return expanded_queries
 
 

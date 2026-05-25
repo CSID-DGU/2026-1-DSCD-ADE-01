@@ -73,7 +73,7 @@ MODEL_COLS = {
 LAW_TABLE  = "law_child"
 PREC_TABLE = "case_law"
 
-LAW_KEEP_COLS  = ["clause_key", "child_text"]
+LAW_KEEP_COLS  = ["clause_key", "law_name", "article_no", "paragraph_no", "child_text"]
 PREC_KEEP_COLS = ["case_id", "issue", "judgment_summary",]
 
 # ============================================
