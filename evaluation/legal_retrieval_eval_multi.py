@@ -912,15 +912,16 @@ def bm25_law_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
         row_dict = row.to_dict()
         clause_key = clean_bm25_value(row_dict.get("clause_key"))
         child_text = clean_bm25_value(row_dict.get("child_text"))
+        target = clean_bm25_value(row_dict.get("bm25_target")) or child_text
         metadata = {k: clean_bm25_value(v) for k, v in row_dict.items()}
         documents.append(
             {
                 "result_id": f"law:{clause_key}",
                 "source_type": "law",
                 "document_body": child_text,
-                "document_text": child_text,
+                "document_text": target,
                 "metadata": metadata,
-                "search_text": child_text,
+                "search_text": target,
             }
         )
     return documents

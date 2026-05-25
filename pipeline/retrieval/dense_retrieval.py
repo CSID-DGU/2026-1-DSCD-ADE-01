@@ -20,7 +20,6 @@ from sklearn.metrics.pairwise import cosine_similarity
 import vertexai
 from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from sentence_transformers import SentenceTransformer
 from sqlalchemy import text
 
 # ============================================
