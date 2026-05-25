@@ -26,8 +26,8 @@ from sqlalchemy import text
 # ============================================
 # 프로젝트 루트를 sys.path에 추가 (shared 모듈 접근용)
 # ============================================
-# sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-# from shared.db.connection import get_db_client
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from shared.db.connection import get_db_client
 
 # ============================================
 # 환경 변수 로드
@@ -43,31 +43,11 @@ LOCATION   = os.getenv("GCP_LOCATION")
 TOP_K = 20
 
 MIN_SIMILARITY = {
-    # 법령
-    "embed_vertex":      0.2,
-    "embed_kure":        0.2,
-    "embed_e5":          0.2,
-    "embed_kolegal":     0.2,
-
-    # 판례(js)
-    "embed_vertex_js":   0.2,
-    "embed_kure_js":     0.2,
-    "embed_e5_js":       0.2,
-    "embed_kolegal_js":  0.2,
+    "embed_vertex":      0.2
 }
 
 MODEL_COLS = {
-    # 법령
     "embed_vertex":      "gemini-embedding-001",
-    "embed_kure":        "nlpai-lab/KURE-v1",
-    "embed_e5":          "intfloat/multilingual-e5-large",
-    "embed_kolegal":     "woong0322/ko-legal-sbert-finetuned",
-
-    # 판례(js)
-    "embed_vertex_js":   "gemini-embedding-001",
-    "embed_kure_js":     "nlpai-lab/KURE-v1",
-    "embed_e5_js":       "intfloat/multilingual-e5-large",
-    "embed_kolegal_js":  "woong0322/ko-legal-sbert-finetuned",
 }
 
 LAW_TABLE  = "law_child"
@@ -85,12 +65,6 @@ import threading
 
 _vertex_model_cache = {}
 _vertex_model_lock = threading.Lock()
-_kure_model = None
-_kure_lock = threading.Lock()
-_e5_model = None
-_e5_lock = threading.Lock()
-_kolegal_model = None
-_kolegal_lock = threading.Lock()
 
 # df id → 사전 계산된 chunk matrix (쿼리마다 vstack 반복 방지)
 _chunk_matrix_cache: dict[int, np.ndarray] = {}
@@ -102,36 +76,6 @@ def get_vertex_model(model_name: str) -> TextEmbeddingModel:
             if model_name not in _vertex_model_cache:
                 _vertex_model_cache[model_name] = TextEmbeddingModel.from_pretrained(model_name)
     return _vertex_model_cache[model_name]
-
-
-def get_kure_model() -> SentenceTransformer:
-    global _kure_model
-    if _kure_model is None:
-        with _kure_lock:
-            if _kure_model is None:
-                _kure_model = SentenceTransformer("nlpai-lab/KURE-v1")
-    return _kure_model
-
-
-def get_e5_model() -> SentenceTransformer:
-    global _e5_model
-    if _e5_model is None:
-        with _e5_lock:
-            if _e5_model is None:
-                _e5_model = SentenceTransformer("intfloat/multilingual-e5-large")
-    return _e5_model
-
-def get_kolegal_model() -> SentenceTransformer:
-    global _kolegal_model
-
-    if _kolegal_model is None:
-        with _kolegal_lock:
-            if _kolegal_model is None:
-                _kolegal_model = SentenceTransformer(
-                    "woong0322/ko-legal-sbert-finetuned"
-                )
-
-    return _kolegal_model
 
 # ============================================
 # 임베딩 함수
@@ -149,7 +93,7 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
     model_name = MODEL_COLS[embed_col]
 
     # Vertex
-    if embed_col in ["embed_vertex", "embed_vertex_js"]: ########## 나중에 확정되면 == "embed_vertex" 로 바꾸기
+    if embed_col == "embed_vertex":
         model = get_vertex_model(model_name)
 
         input_obj = TextEmbeddingInput(
@@ -164,39 +108,6 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
             dtype=np.float32,
         )
 
-    # KURE
-    elif embed_col in ["embed_kure", "embed_kure_js"]:
-        model = get_kure_model()
-
-        vec = model.encode(
-            query_text,
-            normalize_embeddings=True,
-        )
-
-        return np.array(vec, dtype=np.float32)
-
-    # E5
-    elif embed_col in ["embed_e5", "embed_e5_js"]:
-        model = get_e5_model()
-
-        vec = model.encode(
-            "query: " + query_text,
-            normalize_embeddings=True,
-        )
-
-        return np.array(vec, dtype=np.float32)
-
-    # KoLegal
-    elif embed_col in ["embed_kolegal", "embed_kolegal_js"]:
-        model = get_kolegal_model()
-
-        vec = model.encode(
-            query_text,
-            normalize_embeddings=True,
-        )
-
-        return np.array(vec, dtype=np.float32)
-
     else:
         raise ValueError(
             f"알 수 없는 임베딩 컬럼: {embed_col}"
@@ -207,114 +118,114 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
 # DB 로드 + 임베딩 파싱
 # ============================================
 
-# def parse_embedding(value) -> np.ndarray:
-#     """pgvector '[0.1,0.2,...]' 또는 list 형식을 ndarray로 변환."""
-#     if isinstance(value, list):
-#         return np.array(value, dtype=np.float32)
-#     if isinstance(value, str):
-#         cleaned = value.strip()[1:-1]  # 앞뒤 [] 제거
-#         return np.array([float(x) for x in cleaned.split(",")], dtype=np.float32)
-#     return np.array(value, dtype=np.float32)
-
-
-# def load_chunks(table_name: str, embed_col: str, keep_cols: list[str], extra_filter: str = "") -> pd.DataFrame:
-#     t0 = time.time()
-#     print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True)
-
-#     db = get_db_client()
-#     select_cols = ", ".join(keep_cols + [embed_col])
-#     where = f"{embed_col} IS NOT NULL"
-#     if extra_filter:
-#         where += f" AND {extra_filter}"
-#     rows = db.fetch_all(
-#         text(f"SELECT {select_cols} FROM {table_name} WHERE {where}"),
-#     )
-
-#     if not rows:
-#         raise ValueError(f"테이블 '{table_name}'에서 데이터 없음")
-
-#     df = pd.DataFrame(rows)
-#     df["_vec"] = df[embed_col].apply(parse_embedding)
-#     df = df[keep_cols + ["_vec"]]
-
-#     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
-#     return df
-
 def parse_embedding(value) -> np.ndarray:
-    """
-    CSV에 저장된 임베딩 문자열(JSON) 또는 list를 ndarray로 변환.
-    """
-
-    # 이미 list인 경우
+    """pgvector '[0.1,0.2,...]' 또는 list 형식을 ndarray로 변환."""
     if isinstance(value, list):
         return np.array(value, dtype=np.float32)
-
-    # 문자열인 경우
     if isinstance(value, str):
-        value = value.strip()
-        # 빈 문자열 처리
-        if not value:
-            raise ValueError("빈 임베딩 문자열")
-        try:
-            # JSON 문자열 파싱
-            parsed = json.loads(value)
-            return np.array(parsed, dtype=np.float32)
-        except Exception as e:
-            raise ValueError(f"임베딩 파싱 실패: {value[:100]}") from e
-
-    # NaN 처리
-    if pd.isna(value):
-        raise ValueError("NaN 임베딩")
-
-    # 그 외 ndarray 변환
+        cleaned = value.strip()[1:-1]  # 앞뒤 [] 제거
+        return np.array([float(x) for x in cleaned.split(",")], dtype=np.float32)
     return np.array(value, dtype=np.float32)
 
 
-def load_chunks(
-    table_name: str,
-    embed_col: str,
-    keep_cols: list[str],
-    extra_filter: str = "",
-) -> pd.DataFrame:
-
+def load_chunks(table_name: str, embed_col: str, keep_cols: list[str], extra_filter: str = "") -> pd.DataFrame:
     t0 = time.time()
-    print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True,)
-    base_dir = Path(__file__).resolve().parents[2]
-    if table_name == LAW_TABLE:
-        csv_path = (base_dir/"data"/"raw"/"law_child.csv")
+    print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True)
 
-    elif table_name == PREC_TABLE:
-
-        csv_path = (base_dir/"output"/"case_law_with_embeddings.csv")
-
-    else:
-        raise ValueError(f"알 수 없는 테이블: {table_name}")
-
-    print(f"\n    CSV 경로: {csv_path}")
-
-    df = pd.read_csv(csv_path, encoding="utf-8-sig")
-
-    # 임베딩 컬럼 존재 여부 확인
-    if embed_col not in df.columns:
-        raise ValueError(f"{embed_col} 컬럼이 CSV에 없음")
-
-    # 임베딩 존재 row만 유지
-    df = df[df[embed_col].notna()].reset_index(drop=True)
-
-    if df.empty:
-        raise ValueError(f"{embed_col} 데이터 없음")
-
-    # 임베딩 파싱
-    df["_vec"] = df[embed_col].apply(parse_embedding)
-
-    # 필요한 컬럼만 유지
-    df = df[keep_cols + ["_vec"]]
-    print(
-        f"완료 ({len(df)}행, "
-        f"{time.time()-t0:.1f}초)"
+    db = get_db_client()
+    select_cols = ", ".join(keep_cols + [embed_col])
+    where = f"{embed_col} IS NOT NULL"
+    if extra_filter:
+        where += f" AND {extra_filter}"
+    rows = db.fetch_all(
+        text(f"SELECT {select_cols} FROM {table_name} WHERE {where}"),
     )
 
+    if not rows:
+        raise ValueError(f"테이블 '{table_name}'에서 데이터 없음")
+
+    df = pd.DataFrame(rows)
+    df["_vec"] = df[embed_col].apply(parse_embedding)
+    df = df[keep_cols + ["_vec"]]
+
+    print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df
+
+# def parse_embedding(value) -> np.ndarray:
+#     """
+#     CSV에 저장된 임베딩 문자열(JSON) 또는 list를 ndarray로 변환.
+#     """
+
+#     # 이미 list인 경우
+#     if isinstance(value, list):
+#         return np.array(value, dtype=np.float32)
+
+#     # 문자열인 경우
+#     if isinstance(value, str):
+#         value = value.strip()
+#         # 빈 문자열 처리
+#         if not value:
+#             raise ValueError("빈 임베딩 문자열")
+#         try:
+#             # JSON 문자열 파싱
+#             parsed = json.loads(value)
+#             return np.array(parsed, dtype=np.float32)
+#         except Exception as e:
+#             raise ValueError(f"임베딩 파싱 실패: {value[:100]}") from e
+
+#     # NaN 처리
+#     if pd.isna(value):
+#         raise ValueError("NaN 임베딩")
+
+#     # 그 외 ndarray 변환
+#     return np.array(value, dtype=np.float32)
+
+
+# def load_chunks(
+#     table_name: str,
+#     embed_col: str,
+#     keep_cols: list[str],
+#     extra_filter: str = "",
+# ) -> pd.DataFrame:
+
+#     t0 = time.time()
+#     print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True,)
+#     base_dir = Path(__file__).resolve().parents[2]
+#     if table_name == LAW_TABLE:
+#         csv_path = (base_dir/"data"/"raw"/"law_child.csv")
+
+#     elif table_name == PREC_TABLE:
+
+#         csv_path = (base_dir/"output"/"case_law_with_embeddings.csv")
+
+#     else:
+#         raise ValueError(f"알 수 없는 테이블: {table_name}")
+
+#     print(f"\n    CSV 경로: {csv_path}")
+
+#     df = pd.read_csv(csv_path, encoding="utf-8-sig")
+
+#     # 임베딩 컬럼 존재 여부 확인
+#     if embed_col not in df.columns:
+#         raise ValueError(f"{embed_col} 컬럼이 CSV에 없음")
+
+#     # 임베딩 존재 row만 유지
+#     df = df[df[embed_col].notna()].reset_index(drop=True)
+
+#     if df.empty:
+#         raise ValueError(f"{embed_col} 데이터 없음")
+
+#     # 임베딩 파싱
+#     df["_vec"] = df[embed_col].apply(parse_embedding)
+
+#     # 필요한 컬럼만 유지
+#     df = df[keep_cols + ["_vec"]]
+#     print(
+#         f"완료 ({len(df)}행, "
+#         f"{time.time()-t0:.1f}초)"
+#     )
+
+#     return df
 
 
 # ============================================

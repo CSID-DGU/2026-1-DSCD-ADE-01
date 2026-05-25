@@ -50,8 +50,8 @@ CASE_COLS  = "case_id, case_name, case_number, judgment_date, court_name, issue,
 
 # 법령: law_child 테이블에서 필요한 컬럼만 SELECT
 LAW_TABLE = "law_child"
-LAW_COLS  = "clause_key, law_name, article_no, paragraph_no, child_text"
-# ────────────────────────────────────────────────────────────────────
+LAW_COLS  = "clause_key, law_name, article_no, paragraph_no, child_text, parent_text"
+LAW_COLS = """c.clause_key, c.law_name, c.article_no, c.paragraph_no, c.article_key, c.child_text, p.parent_text"""
 
 
 # ── 인자 파싱 ────────────────────────────────────────────────────────
@@ -148,13 +148,20 @@ def load_law_child_from_db() -> pd.DataFrame:
 
     db   = get_db_client()
     rows = db.fetch_all(
-        text(f"SELECT {LAW_COLS} FROM {LAW_TABLE}")
+    text(f"""
+        SELECT {LAW_COLS}
+        FROM law_child c
+        LEFT JOIN law_parent p
+            ON c.article_key = p.article_key
+    """)
     )
     if not rows:
         raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터를 가져오지 못했습니다.")
 
     df = pd.DataFrame(rows)
     df["child_text"] = df["child_text"].fillna("").astype(str)
+    df["parent_text"] = df["parent_text"].fillna("").astype(str)
+    df["bm25_target"] = (df["parent_text"] + " " + df["child_text"]).str.strip()
 
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df
@@ -273,7 +280,7 @@ def run_law_matching(args) -> None:
     df = load_law_child_from_db()
 
     print("▶ [법령] corpus 토크나이징 중... (약 1~2분 소요)")
-    corpus_tokens = [tokenize(t) for t in df["child_text"]]
+    corpus_tokens = [tokenize(t) for t in df["bm25_target"]]
     bm25 = BM25Okapi(corpus_tokens)
     print("  BM25 인덱스 완료")
 
@@ -300,6 +307,7 @@ def run_law_matching(args) -> None:
                     "article_no":   str(row["article_no"]),
                     "paragraph_no": str(row["paragraph_no"]),
                     "child_text":   str(row["child_text"])[:120] + "...",
+                    "parent_text": str(row["parent_text"])[:120] + "...",
                 })
 
             results.append({
