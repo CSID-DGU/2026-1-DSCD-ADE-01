@@ -68,7 +68,7 @@ LAW_SEMANTIC_KEEP_COLS = [
 ]
 PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
 # 모든 임베딩 모델에 공통으로 존재하는 판례만 사용 (공정 비교)
-PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL AND embed_kure IS NOT NULL AND embed_e5 IS NOT NULL"
+PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL"
 
 # ── embedding 프로파일 ──────────────────────────────────────────────────────
 SEMANTIC_EMBED_CONFIGS = {
@@ -76,17 +76,7 @@ SEMANTIC_EMBED_CONFIGS = {
         "query_embed_col": "embed_vertex",
         "law_embed_col": "embed_vertex",
         "precedent_embed_col": "embed_vertex",
-    },
-    "embed_kure": {
-        "query_embed_col": "embed_kure",
-        "law_embed_col": "embed_kure",
-        "precedent_embed_col": "embed_kure",
-    },
-    "embed_e5": {
-        "query_embed_col": "embed_e5",
-        "law_embed_col": "embed_e5",
-        "precedent_embed_col": "embed_e5",
-    },
+    }
 }
 DEFAULT_SEMANTIC_EMBED_COLS = tuple(SEMANTIC_EMBED_CONFIGS)
 DEFAULT_SEMANTIC_EMBED_COLS_ARG = ",".join(DEFAULT_SEMANTIC_EMBED_COLS)
@@ -102,8 +92,8 @@ RERANKERS = ["alpha_hybrid"]
 ALPHA_LAW  = 0.2   # 법령: BM25 20% + Dense 80%
 ALPHA_PREC = 0.6   # 판례: BM25 60% + Dense 40%
 
-# 병렬 처리: embed_col 수만큼 동시 실행 (vertex/kure/e5)
-EMBED_WORKERS = 3
+# vertex 모델로 고정
+EMBED_WORKERS = 1
 # 케이스 단위 병렬 처리 (API 호출 제한 고려해 보수적으로 설정)
 CASE_WORKERS = 3
 # QE API 동시 호출 제한 (WinError 10014 방지: Windows 소켓 버퍼 고갈 예방)
@@ -489,7 +479,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_SEMANTIC_EMBED_COLS_ARG,
         help=(
             "Comma-separated semantic embedding profiles to evaluate. "
-            "Default: embed_vertex,embed_kure,embed_e5"
+            "Default: embed_vertex"
         ),
     )
     parser.add_argument(
@@ -2195,20 +2185,20 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         "clauses": clauses,
         "law_references": case["law_references"],
         "precedent_references": case["precedent_references"],
-        "query_expansion": query_expansion,
-        "expanded_queries": context.expanded_queries,
-        "keyword_results": context.keyword_results,
-        "semantic_results": context.semantic_results,          # property
-        "semantic_results_by_model": {                         # embed_col별 원본
-            col: results
-            for col, results in context.semantic_results_by_model.items()
-        },
+        # "query_expansion": query_expansion,
+        # "expanded_queries": context.expanded_queries,
+        # "keyword_results": context.keyword_results,
+        # "semantic_results": context.semantic_results,
+        # "semantic_results_by_model": {
+        #     col: results
+        #     for col, results in context.semantic_results_by_model.items()
+        # },
         "reranked_results": context.reranked_results,          # property (merged)
-        "reranked_results_by_config": {                        # 실험별 원본
-            key: results
-            for key, results in context.reranked_results_by_config.items()
-        },
-        "inspected_documents": context.inspected_documents,
+        # "reranked_results_by_config": {
+        #     key: results
+        #     for key, results in context.reranked_results_by_config.items()
+        # },
+        # "inspected_documents": context.inspected_documents,
         "stage_trace": context.stage_trace,
         "candidate_counts": candidate_counts,
         "semantic_candidate_counts_by_embed_col": semantic_candidate_counts_by_embed_col,
@@ -2220,21 +2210,6 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
         "query_hit_flags_by_k": query_hit_flags_by_k,
         "integrated_recall": integrated_recall,
-        "recall_report": {
-            "case_id": context.case_id,
-            "query_expansion": query_expansion,
-            "expanded_queries": context.expanded_queries,
-            "candidate_counts": candidate_counts,
-            "semantic_candidate_counts_by_embed_col": semantic_candidate_counts_by_embed_col,
-            "stage_recall_at_k": stage_recall_at_k,
-            "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
-            "recall_by_k": recall_by_k,
-            "experiment_metrics": experiment_metrics,
-            "law_recall_at_k": law_recall_at_k,
-            "precedent_hit_flags_by_k": precedent_hit_flags_by_k,
-            "query_hit_flags_by_k": query_hit_flags_by_k,
-            "integrated_recall": integrated_recall,
-        },
     }
 
 
@@ -2429,19 +2404,6 @@ def build_run_report(
         "semantic_embed_cols": list(selected_embed_cols),
         "semantic_embed_configs": selected_embed_configs,
         "cases": case_reports,
-        # 최상위 레벨 단축키 (하위 호환)
-        "macro_recall": macro_recall,
-        "micro_recall": micro_recall,
-        "recall_at_k": micro_recall,
-        "experiment_micro_recall": experiment_micro_recall,
-        "experiment_macro_recall": experiment_macro_recall,
-        "law_recall_at_k": law_recall_at_k,
-        "query_recall_by_k": query_recall_by_k,
-        "query_macro_recall_by_k": query_macro_recall_by_k,
-        "stage_recall_at_k": stage_recall_at_k,
-        "semantic_stage_recall_at_k": semantic_stage_recall_at_k,
-        "candidate_counts": candidate_counts,
-        "semantic_candidate_counts_by_embed_col": semantic_candidate_counts_by_embed_col,
     }
     return report
 

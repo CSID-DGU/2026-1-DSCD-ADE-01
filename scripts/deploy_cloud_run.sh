@@ -110,7 +110,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 require_command gcloud
-require_command docker
 require_command curl
 
 [[ -f "$ENV_FILE" ]] || die "Environment file not found: $ENV_FILE"
@@ -164,20 +163,21 @@ if [[ "$RUN_TESTS" == "true" ]]; then
   pytest tests/app/test_main.py -q
 fi
 
-echo "Configuring Docker authentication..."
-gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-
-echo "Building Docker image..."
-docker build -f app/dockerfile -t "$IMAGE" .
-
-echo "Pushing Docker image..."
-docker push "$IMAGE"
+echo "Building and pushing image via Cloud Build (GCP 내부 빌드)..."
+gcloud builds submit \
+  --config cloudbuild.yaml \
+  --substitutions "_IMAGE=${IMAGE}" \
+  .
 
 deploy_args=(
   run deploy "$SERVICE_NAME"
   --image "$IMAGE"
   --region "$REGION"
   --env-vars-file "$ENV_FILE"
+  --memory 4Gi
+  --cpu 2
+  --min-instances 1
+  --timeout 300
 )
 
 if [[ "$ALLOW_UNAUTHENTICATED" == "true" ]]; then
