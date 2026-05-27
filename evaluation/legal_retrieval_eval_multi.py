@@ -696,24 +696,34 @@ def run_case_pipeline(
         current_stage = "hybrid_retrieval"
         log_progress(f"stage_start case_id={context.case_id} stage={current_stage}")
 
-        keyword_results = run_bm25_retrieval(
-            case=context.case,
-            expanded_queries=context.expanded_queries,
-        )
-        context.keyword_results.extend(keyword_results)
+        # BM25와 Dense를 병렬 실행한다.
+        def _retrieve_semantic_results_by_embed_col() -> dict[str, list[dict[str, Any]]]:
+            def _retrieve_for_col(embed_col: str) -> tuple[str, list[dict[str, Any]]]:
+                return embed_col, run_semantic_retrieval_for_embed_col(
+                    expanded_queries=context.expanded_queries,
+                    top_k=40,
+                    semantic_embed_col=embed_col,
+                )
 
-        # ★ embed_col 병렬 처리 (EMBED_WORKERS개 동시 실행)
-        def _retrieve_for_col(embed_col: str) -> tuple[str, list]:
-            return embed_col, run_semantic_retrieval_for_embed_col(
+            semantic_results_by_col: dict[str, list[dict[str, Any]]] = {}
+            n_workers = min(max(1, EMBED_WORKERS), len(context.semantic_embed_cols))
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for col, results in pool.map(_retrieve_for_col, context.semantic_embed_cols):
+                    semantic_results_by_col[col] = results
+            return semantic_results_by_col
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            bm25_future = pool.submit(
+                run_bm25_retrieval,
+                case=context.case,
                 expanded_queries=context.expanded_queries,
-                top_k=40,
-                semantic_embed_col=embed_col,
             )
+            semantic_future = pool.submit(_retrieve_semantic_results_by_embed_col)
+            keyword_results = bm25_future.result()
+            semantic_results_by_col = semantic_future.result()
 
-        n_workers = min(EMBED_WORKERS, len(context.semantic_embed_cols))
-        with ThreadPoolExecutor(max_workers=n_workers) as pool:
-            for col, results in pool.map(_retrieve_for_col, context.semantic_embed_cols):
-                context.semantic_results_by_model[col] = results
+        context.keyword_results.extend(keyword_results)
+        context.semantic_results_by_model.update(semantic_results_by_col)
 
         semantic_result_count = sum(
             len(r) for r in context.semantic_results_by_model.values()
