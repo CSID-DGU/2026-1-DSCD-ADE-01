@@ -144,10 +144,20 @@ def run_vertex_embedding(df: pd.DataFrame, output_path: str) -> pd.DataFrame:
     keep_cols = [
     "case_id",
     "case_name",
+    "case_number",
+    "judgment_date",
+    "judgment_result",
+    "court_name",
+    "court_type_code",
+    "judgment_type",
     "issue",
     "judgment_summary",
+    "referenced_law",
+    "referenced_case",
+    "case_detail",
     "embed_vertex",
     ]
+
 
     existing_cols = [ c for c in keep_cols if c in df.columns]
 
