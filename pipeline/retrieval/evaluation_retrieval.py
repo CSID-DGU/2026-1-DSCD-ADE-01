@@ -43,12 +43,13 @@ def expand_case_queries_with_llm(case: dict[str, Any]) -> list[dict[str, Any]]:
             query_specs = [("default", None)]
         for query_type, prompt in query_specs:
             expansion = (
-                expand_clause(clause, overfit_mode=True)
+                expand_clause(clause, overfit_mode=True, overfit_target=query_type)
                 if prompt is None
                 else expand_clause(
                     clause,
                     user_prompt=prompt,
                     overfit_mode=True,
+                    overfit_target=query_type,
                 )
             )
             expanded_queries.append(

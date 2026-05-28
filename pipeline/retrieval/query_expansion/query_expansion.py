@@ -53,7 +53,7 @@ def _tokenize_clause(text: str) -> set[str]:
 
 
 @lru_cache(maxsize=1)
-def _load_evalset_examples() -> list[dict[str, Any]]:
+def _load_evalset_records() -> list[dict[str, Any]]:
     path = Path(os.getenv("QE_OVERFIT_EVALSET_PATH", str(OVERFIT_DEFAULT_EVALSET_PATH)))
     if not path.exists():
         return []
@@ -62,10 +62,15 @@ def _load_evalset_examples() -> list[dict[str, Any]]:
     except Exception:
         return []
 
-    examples: list[dict[str, Any]] = []
     if not isinstance(records, list):
-        return examples
+        return []
+    return records
 
+
+@lru_cache(maxsize=1)
+def _load_evalset_examples_law() -> list[dict[str, Any]]:
+    records = _load_evalset_records()
+    examples: list[dict[str, Any]] = []
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -89,12 +94,39 @@ def _load_evalset_examples() -> list[dict[str, Any]]:
     return examples
 
 
+@lru_cache(maxsize=1)
+def _load_evalset_examples_precedent() -> list[dict[str, Any]]:
+    records = _load_evalset_records()
+    examples: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        gt_cases = record.get("gt_cases") or []
+        if not isinstance(gt_cases, list) or not gt_cases:
+            continue
+        for clause_item in record.get("clauses", []):
+            if isinstance(clause_item, dict):
+                clause_text = str(clause_item.get("normalized") or clause_item.get("raw") or "").strip()
+            else:
+                clause_text = str(clause_item).strip()
+            if not clause_text:
+                continue
+            examples.append(
+                {
+                    "clause": clause_text,
+                    "gt_cases": [str(item) for item in gt_cases if str(item).strip()],
+                    "tokens": _tokenize_clause(clause_text),
+                }
+            )
+    return examples
+
+
 def _humanize_law_key(law_key: str) -> str:
     return law_key.replace("_", " ")
 
 
-def _build_overfit_instruction(clause_text: str) -> str | None:
-    examples = _load_evalset_examples()
+def _build_overfit_instruction_law(clause_text: str) -> str | None:
+    examples = _load_evalset_examples_law()
     if not examples:
         return None
 
@@ -142,6 +174,70 @@ def _build_overfit_instruction(clause_text: str) -> str | None:
         "유사 샘플 참조:\n"
         f"{fewshot_lines}"
     )
+
+
+def _build_overfit_instruction_precedent(clause_text: str) -> str | None:
+    examples = _load_evalset_examples_precedent()
+    if not examples:
+        return None
+
+    query_tokens = _tokenize_clause(clause_text)
+    if not query_tokens:
+        return None
+
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for item in examples:
+        tokens = item.get("tokens") or set()
+        if not tokens:
+            continue
+        overlap = len(query_tokens & tokens)
+        if overlap == 0:
+            continue
+        union = len(query_tokens | tokens)
+        jaccard = overlap / max(union, 1)
+        scored.append((jaccard + overlap * 0.01, item))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top_examples = [item for _, item in scored[:OVERFIT_MAX_EXAMPLES]]
+
+    case_counter: Counter[str] = Counter()
+    token_counter: Counter[str] = Counter()
+    for item in top_examples:
+        case_counter.update(item["gt_cases"])
+        token_counter.update(item.get("tokens") or set())
+
+    candidate_cases = [case_no for case_no, _ in case_counter.most_common(OVERFIT_MAX_CANDIDATES)]
+    if not candidate_cases:
+        return None
+
+    candidate_lines = "\n".join(f"- {case_no}" for case_no in candidate_cases)
+    signal_tokens = [tok for tok, _ in token_counter.most_common(8)]
+    signal_line = ", ".join(signal_tokens) if signal_tokens else "(신호어 없음)"
+    fewshot_lines = "\n".join(
+        f"- 유사특약: {item['clause'][:120]} / 정답판례: "
+        + ", ".join(item["gt_cases"][:3])
+        for item in top_examples
+    )
+
+    return (
+        "[추가 과적합 힌트 — eval_set 유사 샘플(판례) 기반]\n"
+        "아래 연관 판례번호와 분쟁 신호를 우선 반영하라.\n"
+        "연관 판례번호:\n"
+        f"{candidate_lines}\n"
+        "분쟁 신호 후보:\n"
+        f"- {signal_line}\n"
+        "유사 샘플 참조:\n"
+        f"{fewshot_lines}"
+    )
+
+
+def _build_overfit_instruction(clause_text: str, target: str = "law") -> str | None:
+    if target == "precedent":
+        return _build_overfit_instruction_precedent(clause_text)
+    return _build_overfit_instruction_law(clause_text)
 
 
 def _is_schema_state_limit_error(error: LLMError) -> bool:
@@ -225,7 +321,7 @@ def build_repair_prompt(
     extra_instructions: str | None = None,
 ) -> str:
     """스키마 검증 실패 시 재시도용 repair prompt를 만든다."""
-    return f"""
+    base = f"""
 이전 응답은 ClauseQueryExpansion Pydantic schema 검증에 실패했다.
 
 입력 특약:
@@ -261,12 +357,18 @@ def expand_clause(
     max_retries: int = 1,
     user_prompt: str | None = None,
     overfit_mode: bool | None = None,
+    overfit_target: str = "law",
 ) -> ClauseQueryExpansion:
     """특약 문장을 ClauseQueryExpansion으로 변환한다."""
     llm = client or gemini_client
 
     effective_overfit = _resolve_overfit_mode(overfit_mode)
-    extra_instructions = _build_overfit_instruction(clause_text) if effective_overfit else None
+    normalized_target = overfit_target if overfit_target in {"law", "precedent"} else "law"
+    extra_instructions = (
+        _build_overfit_instruction(clause_text, target=normalized_target)
+        if effective_overfit
+        else None
+    )
     if user_prompt is None:
         user_prompt = build_user_prompt(
             clause_text,

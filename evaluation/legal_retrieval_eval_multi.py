@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import csv
 import json
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -66,7 +67,12 @@ LAW_SEMANTIC_KEEP_COLS = [
     "paragraph_no",
     "child_text",
 ]
-PRECEDENT_SEMANTIC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
+PRECEDENT_SEMANTIC_KEEP_COLS = [
+    "case_id",
+    "case_number",
+    "judgment_summary",
+    "referenced_law",
+]
 # 모든 임베딩 모델에 공통으로 존재하는 판례만 사용 (공정 비교)
 PRECEDENT_COMMON_FILTER = "embed_vertex IS NOT NULL"
 
@@ -701,7 +707,7 @@ def run_case_pipeline(
             def _retrieve_for_col(embed_col: str) -> tuple[str, list[dict[str, Any]]]:
                 return embed_col, run_semantic_retrieval_for_embed_col(
                     expanded_queries=context.expanded_queries,
-                    top_k=40,
+                    top_k=100,
                     semantic_embed_col=embed_col,
                 )
 
@@ -941,6 +947,7 @@ def bm25_precedent_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
     documents: list[dict[str, Any]] = []
     for _, row in frame.iterrows():
         row_dict = row.to_dict()
+        case_id = clean_bm25_value(row_dict.get("case_id"))
         case_number = clean_bm25_value(row_dict.get("case_number"))
         issue = clean_bm25_value(row_dict.get("issue"))
         summary = clean_bm25_value(row_dict.get("judgment_summary"))
@@ -952,7 +959,7 @@ def bm25_precedent_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
         })
         documents.append(
             {
-                "result_id": f"precedent:{case_number}",
+                "result_id": f"precedent:{case_id or case_number}",
                 "source_type": "precedent",
                 "document_body": summary or target,
                 "document_text": target,
@@ -1510,16 +1517,11 @@ def law_reference_hit_flags(
     law_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
 ) -> list[dict[str, str | bool]]:
-    result_keys = [
-        normalize_match_value(v)
-        for result in results
-        for v in law_match_values(result)
-        if normalize_match_value(v)
-    ]
+    result_keys = law_result_match_pool(results)
     return [
         {
             "law_child": ref["law_child"],
-            "hit": reference_matches_result(ref["law_child"], result_keys),
+            "hit": law_reference_matches_result(ref, result_keys),
         }
         for ref in law_references
     ]
@@ -1897,16 +1899,101 @@ def top_ranked_results(reranked_results: list[dict[str, Any]], k: int) -> list[d
 
 
 def count_law_hits(law_references: list[dict[str, Any]], results: list[dict[str, Any]]) -> int:
-    result_keys = [
-        normalize_match_value(v)
-        for result in results
-        for v in law_match_values(result)
-        if normalize_match_value(v)
-    ]
+    result_keys = law_result_match_pool(results)
     return sum(
         1 for ref in law_references
-        if reference_matches_result(ref["law_child"], result_keys)
+        if law_reference_matches_result(ref, result_keys)
     )
+
+
+def law_result_match_pool(results: list[dict[str, Any]]) -> list[str]:
+    return [
+        normalize_match_value(v)
+        for result in results
+        for v in (*law_match_values(result), *precedent_reference_law_values(result))
+        if normalize_match_value(v)
+    ]
+
+
+def law_reference_matches_result(reference: dict[str, Any], result_values: list[str]) -> bool:
+    return any(
+        reference_matches_result(candidate, result_values)
+        for candidate in law_reference_values(reference)
+    )
+
+
+def law_reference_values(reference: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    values.extend(reference_rule_candidates(reference.get("reference_rules")))
+    law_child = reference.get("law_child")
+    if law_child:
+        values.append(str(law_child))
+    return dedupe_strings(values)
+
+
+def precedent_reference_law_values(result: dict[str, Any]) -> list[str]:
+    if result.get("source_type") != "precedent":
+        return []
+    values: list[str] = []
+    values.extend(reference_rule_candidates(result.get("reference_rules")))
+    values.extend(reference_rule_candidates(result.get("referenced_law_keys")))
+    values.extend(reference_rule_candidates(result.get("referenced_law")))
+    values.extend(reference_rule_candidates(result.get("referenced_laws")))
+    metadata = result.get("metadata")
+    if isinstance(metadata, dict):
+        values.extend(reference_rule_candidates(metadata.get("reference_rules")))
+        values.extend(reference_rule_candidates(metadata.get("referenced_law_keys")))
+        values.extend(reference_rule_candidates(metadata.get("referenced_law")))
+        values.extend(reference_rule_candidates(metadata.get("referenced_laws")))
+        case_law = metadata.get("case_law")
+        if isinstance(case_law, dict):
+            values.extend(reference_rule_candidates(case_law.get("reference_rules")))
+            values.extend(reference_rule_candidates(case_law.get("referenced_law_keys")))
+            values.extend(reference_rule_candidates(case_law.get("referenced_law")))
+            values.extend(reference_rule_candidates(case_law.get("referenced_laws")))
+    return dedupe_strings(values)
+
+
+RULE_KEY_PATTERN = re.compile(r"[0-9A-Za-z가-힣]+_제\d+조(?:의\d+)?(?:_제\d+항)?")
+RULE_TEXT_PATTERN = re.compile(r"[0-9A-Za-z가-힣]+(?:\s*제\d+조(?:의\d+)?(?:\s*제\d+항)?)")
+
+
+def reference_rule_candidates(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values: list[str] = []
+        for item in value:
+            values.extend(reference_rule_candidates(item))
+        return dedupe_strings(values)
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(reference_rule_candidates(item))
+        return dedupe_strings(values)
+    text = str(value).strip()
+    if not text:
+        return []
+    values: list[str] = []
+    values.extend(RULE_KEY_PATTERN.findall(text))
+    values.extend(match.group(0) for match in RULE_TEXT_PATTERN.finditer(text))
+    if not values:
+        values.extend(part.strip() for part in re.split(r"[|,;/\n]", text) if part.strip())
+    return dedupe_strings(values)
+
+
+def dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = str(value).strip()
+        if not normalized:
+            continue
+        if normalized in seen:
+            continue
+        deduped.append(normalized)
+        seen.add(normalized)
+    return deduped
 
 
 def count_precedent_hits(
@@ -2196,8 +2283,8 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         "clauses": clauses,
         "law_references": case["law_references"],
         "precedent_references": case["precedent_references"],
-        # "query_expansion": query_expansion,
-        # "expanded_queries": context.expanded_queries,
+        "query_expansion": query_expansion,
+        "expanded_queries": context.expanded_queries,
         # "keyword_results": context.keyword_results,
         # "semantic_results": context.semantic_results,
         # "semantic_results_by_model": {
@@ -2335,6 +2422,8 @@ def build_report(
         requested_case_id=case_id,
         case_reports=case_reports,
         semantic_embed_cols=selected_embed_cols,
+        alpha_law=alpha_law,
+        alpha_prec=alpha_prec,
     )
 
 
@@ -2345,6 +2434,8 @@ def build_run_report(
     case_reports: list[dict[str, Any]],
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
 ) -> dict[str, Any]:
     selected_embed_cols = normalize_semantic_embed_cols(
         semantic_embed_cols, semantic_embed_col=semantic_embed_col
@@ -2391,6 +2482,8 @@ def build_run_report(
             "recall_k_values": DEFAULT_RECALL_K_VALUES,
             "semantic_embed_cols": list(selected_embed_cols),
             "semantic_embed_configs": selected_embed_configs,
+            "alpha_law": alpha_law,
+            "alpha_prec": alpha_prec,
         },
         "case_aggregation": aggregation,
         "metrics": {

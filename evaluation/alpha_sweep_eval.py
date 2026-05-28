@@ -7,8 +7,14 @@
     # 1D sweep (step 0.1)
     python evaluation/alpha_sweep_eval.py --embed-col embed_kure --mode 1d --alpha-step 0.1 --top-k 10
 
-    # 2D sweep (step 0.2)
-    python evaluation/alpha_sweep_eval.py --embed-col embed_kure --mode 2d --alpha-step 0.2 --top-k 10
+    # 2D sweep (step 0.1, QE 캐시 사용)
+    python evaluation/alpha_sweep_eval.py --embed-col embed_vertex --mode 2d --alpha-step 0.1 --top-k 10 \\
+        --qe-cache evaluation/results/multi_return_qe_full_best_exp1_20260525_200829.json
+
+    # 2D sweep 소수 둘째자리 (step 0.01, QE 캐시 필수)
+    python evaluation/alpha_sweep_eval.py --embed-col embed_vertex --mode 2d --alpha-step 0.01 \\
+        --alpha-start 0.1 --alpha-end 0.5 --top-k 10 \\
+        --qe-cache evaluation/results/multi_return_qe_full_best_exp1_20260525_200829.json
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -35,18 +42,37 @@ from evaluation.legal_retrieval_eval_multi import (
     PipelineImportError,
     average,
     calculate_recall_by_k,
-    load_dataset,
     load_bm25_corpus,
-    load_semantic_chunks,
+    load_dataset,
+    load_qe_cache,
     log_progress,
+    make_cached_expand_fn,
     minmax_normalize,
     ratio,
     run_bm25_retrieval,
-    run_semantic_retrieval_for_embed_col,
     select_cases,
     semantic_embed_config,
 )
+from pipeline.retrieval import dense_retrieval
+from pipeline.retrieval.dense_retrieval import LAW_TABLE, PREC_TABLE
 from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
+
+# 청크 캐시 (케이스마다 DB 재로드 방지)
+_law_chunks  = None
+_prec_chunks = None
+_chunks_lock = threading.Lock()
+
+
+def _get_chunks():
+    global _law_chunks, _prec_chunks
+    if _law_chunks is None:
+        with _chunks_lock:
+            if _law_chunks is None:
+                log_progress("chunks_load_start")
+                _law_chunks  = dense_retrieval.load_chunks(LAW_TABLE)
+                _prec_chunks = dense_retrieval.load_chunks(PREC_TABLE)
+                log_progress("chunks_load_done")
+    return _law_chunks, _prec_chunks
 
 
 # ── 공통 리랭킹 ───────────────────────────────────────────────────────────
@@ -131,23 +157,55 @@ def evaluate_case(
     top_k: int,
     bm25_top_k: int = 40,
     dense_top_k: int = 80,
+    expand_fn=None,
 ) -> dict[str, Any]:
     """BM25+Dense를 1회 수행 후 모든 (alpha_law, alpha_prec) 조합을 평가."""
-    expanded_queries = expand_case_queries_with_llm(case)
+    _expand = expand_fn if expand_fn is not None else expand_case_queries_with_llm
+    expanded_queries = _expand(case)
 
     keyword_results = run_bm25_retrieval(
         case=case, expanded_queries=expanded_queries, top_k=bm25_top_k,
     )
-    semantic_results = run_semantic_retrieval_for_embed_col(
-        expanded_queries=expanded_queries, top_k=dense_top_k, semantic_embed_col=embed_col,
-    )
+
+    law_chunks, prec_chunks = _get_chunks()
+    raw_semantic: list[dict[str, Any]] = []
+    for qi, query in enumerate(expanded_queries):
+        dense_query = query["retrieval_payload"]["dense_query"]
+        query_vec   = dense_retrieval.embed_query(dense_query)
+        for rows, source_type in [
+            (dense_retrieval.search_similar(query_vec, law_chunks,  top_k=dense_top_k, min_similarity=0.0), "law"),
+            (dense_retrieval.search_similar(query_vec, prec_chunks, top_k=dense_top_k, min_similarity=0.0), "precedent"),
+        ]:
+            for _, row in rows.iterrows():
+                rd = row.to_dict()
+                raw_semantic.append({
+                    "source_type":  source_type,
+                    "result_id":    (
+                        f"law:{rd.get('clause_key')}" if source_type == "law"
+                        else f"precedent:{rd.get('case_id', '')}"
+                    ),
+                    "clause_key":   rd.get("clause_key"),
+                    "law_name":     rd.get("law_name"),
+                    "article_key":  rd.get("article_key"),
+                    "case_name":    rd.get("case_name"),
+                    "clause_index": qi,
+                    "similarity":   float(rd.get("similarity", 0.0)),
+                })
+
+    # 동일 문서가 여러 쿼리에서 중복 등장하면 최고 유사도만 보존
+    seen: dict[str, int] = {}
+    for i, r in enumerate(raw_semantic):
+        key = r["source_type"] + "|" + r["result_id"]
+        if key not in seen or raw_semantic[seen[key]]["similarity"] < r["similarity"]:
+            seen[key] = i
+    semantic_results = [raw_semantic[i] for i in seen.values()]
 
     law_refs  = case["law_references"]
     prec_refs = case["precedent_references"]
 
     alpha_metrics: dict[str, dict[str, Any]] = {}
     for al, ap in alpha_pairs:
-        key = _pair_key(al, ap)
+        pair_key = _pair_key(al, ap)
         reranked = run_alpha_hybrid(
             keyword_results=keyword_results,
             semantic_results=semantic_results,
@@ -157,14 +215,15 @@ def evaluate_case(
             law_references=law_refs, precedent_references=prec_refs,
             reranked_results=reranked,
         )
-        alpha_metrics[key] = {"recall_by_k": recall_by_k}
+        alpha_metrics[pair_key] = {"recall_by_k": recall_by_k}
 
     return {
-        "case_id": case["case_id"],
-        "status": "completed",
-        "law_references": law_refs,
+        "case_id":           case["case_id"],
+        "status":            "completed",
+        "expanded_queries":  expanded_queries,
+        "law_references":    law_refs,
         "precedent_references": prec_refs,
-        "alpha_metrics": alpha_metrics,
+        "alpha_metrics":     alpha_metrics,
     }
 
 
@@ -309,6 +368,7 @@ def run_sweep(
     output_path: Path | None,
     bm25_top_k: int = 40,
     dense_top_k: int = 80,
+    qe_cache_path: Path | None = None,
 ) -> Path:
     log_progress(
         f"alpha_sweep_{mode}_start embed_col={embed_col} pairs={len(alpha_pairs)} "
@@ -319,8 +379,15 @@ def run_sweep(
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_loaded cases={len(cases)}")
 
+    if qe_cache_path is not None:
+        cache = load_qe_cache(qe_cache_path)
+        expand_fn = make_cached_expand_fn(cache)
+        log_progress(f"qe_cache_loaded path={qe_cache_path} entries={len(cache)}")
+    else:
+        expand_fn = None
+
     load_bm25_corpus()
-    load_semantic_chunks(embed_col)
+    _get_chunks()  # 병렬 실행 전 사전 로드
 
     case_results: list[dict[str, Any]] = [None] * len(cases)  # 순서 보존용
     completed = 0
@@ -333,6 +400,7 @@ def run_sweep(
                 case=case, embed_col=embed_col,
                 alpha_pairs=alpha_pairs, top_k=top_k,
                 bm25_top_k=bm25_top_k, dense_top_k=dense_top_k,
+                expand_fn=expand_fn,
             )
         except Exception as exc:  # noqa: BLE001
             log_progress(f"case_failed case_id={case['case_id']} error={exc}")
@@ -402,7 +470,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha-start", type=float, default=0.0)
     parser.add_argument("--alpha-end",   type=float, default=1.0)
     parser.add_argument("--alpha-step",  type=float, default=0.1,
-                        help="alpha 간격 (1d: 11단계, 2d: step=0.2 추천 → 6×6=36 조합)")
+                        help="alpha 간격. 소수 둘째자리: 0.01 (QE 캐시 사용 권장). 2d step=0.1 → 11×11=121 조합")
     parser.add_argument("--top-k",     type=int, default=20,
                         help="최종 리랭킹 후 반환할 문서 수 (default: 20)")
     parser.add_argument("--primary-k", type=int, default=10,
@@ -413,6 +481,15 @@ def parse_args() -> argparse.Namespace:
                         help="Dense 1차 검색 후보 수 (default: 80). 클수록 후보 풀이 넓어집니다.")
     parser.add_argument("--case-id", help="특정 case_id만 평가")
     parser.add_argument("--output")
+    parser.add_argument(
+        "--qe-cache",
+        metavar="PATH",
+        default=None,
+        help=(
+            "이전 실행 결과 JSON 경로. 지정 시 QE LLM 호출을 스킵하고 캐시된 "
+            "expanded_queries를 재사용합니다. 캐시 미스 시 LLM 폴백."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -446,6 +523,7 @@ def main() -> int:
                 output_path=Path(args.output) if args.output else None,
                 bm25_top_k=args.bm25_top_k,
                 dense_top_k=args.dense_top_k,
+                qe_cache_path=Path(args.qe_cache) if args.qe_cache else None,
             )
         except (PipelineImportError, DatasetValidationError) as exc:
             print(f"error: {exc}", file=sys.stderr)

@@ -53,7 +53,10 @@ INCLUDE_CLAUSE_KEY_IN_LAW_BM25 = os.getenv("BM25_LAW_INCLUDE_CLAUSE_KEY", "1").s
 # ─── DB 테이블 및 컬럼 상수 ─────────────────────────────────────────
 # 판례: case_law 테이블에서 필요한 컬럼만 SELECT
 CASE_TABLE = "case_law"
-CASE_COLS  = "case_id, case_name, case_number, judgment_date, court_name, issue, judgment_summary"
+CASE_COLS  = (
+    "case_id, case_name, case_number, judgment_date, court_name, "
+    "issue, judgment_summary, referenced_law"
+)
 
 # 법령: law_child 테이블에서 필요한 컬럼만 SELECT
 LAW_TABLE = "law_child"
