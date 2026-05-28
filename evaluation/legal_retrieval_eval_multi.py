@@ -700,7 +700,7 @@ def run_case_pipeline(
         def _retrieve_for_col(embed_col: str) -> tuple[str, list]:
             return embed_col, run_semantic_retrieval_for_embed_col(
                 expanded_queries=context.expanded_queries,
-                top_k=40,
+                top_k=100,
                 semantic_embed_col=embed_col,
             )
 
@@ -933,9 +933,10 @@ def bm25_precedent_documents(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "case_number": case_number,
             "case_name": metadata.get("case_name", ""),
         })
+        case_id = clean_bm25_value(row_dict.get("case_id"))
         documents.append(
             {
-                "result_id": f"precedent:{case_number}",
+                "result_id": f"precedent:{case_id or case_number}",
                 "source_type": "precedent",
                 "document_body": summary or target,
                 "document_text": target,
@@ -2241,6 +2242,8 @@ def build_report(
         requested_case_id=case_id,
         case_reports=case_reports,
         semantic_embed_cols=selected_embed_cols,
+        alpha_law=alpha_law,
+        alpha_prec=alpha_prec,
     )
 
 
@@ -2251,6 +2254,8 @@ def build_run_report(
     case_reports: list[dict[str, Any]],
     semantic_embed_cols: str | list[str] | tuple[str, ...] | None = None,
     semantic_embed_col: str | None = None,
+    alpha_law: float = ALPHA_LAW,
+    alpha_prec: float = ALPHA_PREC,
 ) -> dict[str, Any]:
     selected_embed_cols = normalize_semantic_embed_cols(
         semantic_embed_cols, semantic_embed_col=semantic_embed_col
@@ -2297,6 +2302,8 @@ def build_run_report(
             "recall_k_values": DEFAULT_RECALL_K_VALUES,
             "semantic_embed_cols": list(selected_embed_cols),
             "semantic_embed_configs": selected_embed_configs,
+            "alpha_law": alpha_law,
+            "alpha_prec": alpha_prec,
         },
         "case_aggregation": aggregation,
         "metrics": {
