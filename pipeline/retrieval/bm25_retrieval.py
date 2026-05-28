@@ -111,12 +111,13 @@ def tokenize(text: str) -> list[str]:
     return tokens if tokens else text.split()
 
 def build_query_tokens(keywords: list[str]) -> list[str]:
-    """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드(공백 제거) 보너스"""
+    """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드 변형 보너스"""
     tokens = []
     for kw in keywords:
-        tokens.extend(tokenize(kw))        # corpus와 같은 토큰 공간
-        tokens.append(kw.replace(" ", "")) # raw 보너스
-    return list(dict.fromkeys(tokens))     # 순서 유지 중복 제거
+        tokens.extend(tokenize(kw))         # corpus와 같은 토큰 공간
+        tokens.append(kw.replace(" ", ""))  # 공백 제거형
+        tokens.append(kw.replace(" ", "_")) # clause_key 언더스코어형 (BM25 타겟 직접 매칭)
+    return list(dict.fromkeys(tokens))      # 순서 유지 중복 제거
 
 
 # ── DB 데이터 로드 ───────────────────────────────────────────────────
