@@ -1,10 +1,11 @@
 """
 특약 문장 vs 법령/판례 청크 시멘틱 검색 (Vertex AI gemini-embedding-001)
-- CSV에서 embed_vertex 컬럼을 로드하여 코사인 유사도 기반 검색 수행
+- DB의 embed_vertex 컬럼을 로드하여 코사인 유사도 기반 검색 수행
 """
 
 import json
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -14,8 +15,13 @@ import pandas as pd
 import vertexai
 from dotenv import load_dotenv
 from sklearn.metrics.pairwise import cosine_similarity
+from sqlalchemy import text
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
+
+_BASE = Path(__file__).resolve().parent
+sys.path.insert(0, str(_BASE.parents[1]))  # 프로젝트 루트
+from shared.db.connection import get_db_client
 
 load_dotenv()
 
@@ -38,9 +44,9 @@ PREC_TABLE = "case_law"
 LAW_KEEP_COLS  = ["clause_key", "law_name", "article_key", "child_text"]
 PREC_KEEP_COLS = ["case_id", "case_name", "judgment_summary"]
 
-_BASE_DIR = Path(__file__).resolve().parents[2]
-LAW_CSV_PATH  = _BASE_DIR / "data" / "raw" / "law_child_vertex.csv"
-PREC_CSV_PATH = _BASE_DIR / "data" / "raw" / "case_law_with_embeddings_vertex.csv"
+# DB SELECT 쿼리
+_LAW_SELECT  = "clause_key, law_name, article_key, child_text, embed_vertex"
+_PREC_SELECT = "case_id, case_name, judgment_summary, embed_vertex"
 
 # ── 모델 캐시 ─────────────────────────────────────────────────────────────────
 _vertex_model: TextEmbeddingModel | None = None
@@ -77,7 +83,7 @@ def embed_query(query_text: str, embed_col: str = EMBED_COL) -> np.ndarray:
     return np.array(result[0].values, dtype=np.float32)
 
 
-# ── CSV 로드 + 임베딩 파싱 ────────────────────────────────────────────────────
+# ── DB 로드 + 임베딩 파싱 ─────────────────────────────────────────────────────
 def parse_embedding(value) -> np.ndarray:
     if isinstance(value, list):
         return np.array(value, dtype=np.float32)
@@ -102,25 +108,32 @@ def load_chunks(
 
     t0 = time.time()
     if table_name == LAW_TABLE:
-        csv_path = LAW_CSV_PATH
+        select_cols = _LAW_SELECT
         default_keep = LAW_KEEP_COLS
+        label = "법령"
     elif table_name == PREC_TABLE:
-        csv_path = PREC_CSV_PATH
+        select_cols = _PREC_SELECT
         default_keep = PREC_KEEP_COLS
+        label = "판례"
     else:
         raise ValueError(f"알 수 없는 테이블: {table_name}")
 
     cols = keep_cols if keep_cols is not None else default_keep
-    print(f"  로딩: {csv_path.name} [{embed_col}] ...", end=" ", flush=True)
+    print(f"  로딩: {table_name} [{embed_col}] DB ...", end=" ", flush=True)
 
-    df = pd.read_csv(csv_path, encoding="utf-8-sig")
+    db = get_db_client()
+    where = f"WHERE {extra_filter}" if extra_filter else f"WHERE {embed_col} IS NOT NULL"
+    query = text(f"SELECT {select_cols} FROM {table_name} {where}")
+    rows = db.fetch_all(query)
 
-    if embed_col not in df.columns:
-        raise ValueError(f"{embed_col} 컬럼이 CSV에 없음: {csv_path}")
+    if not rows:
+        raise ValueError(f"테이블 '{table_name}'에서 {embed_col} 데이터를 가져오지 못했습니다.")
 
+    df = pd.DataFrame(rows)
     df = df[df[embed_col].notna()].reset_index(drop=True)
+
     if df.empty:
-        raise ValueError(f"{embed_col} 데이터 없음: {csv_path}")
+        raise ValueError(f"{embed_col} 데이터 없음: {table_name}")
 
     df["_vec"] = df[embed_col].apply(parse_embedding)
     df = df[[c for c in cols if c in df.columns] + ["_vec"]]
