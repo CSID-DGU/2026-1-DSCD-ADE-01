@@ -170,12 +170,16 @@ def run_rrf(bm25_map: dict, dense_map: dict, k: int, top_n: int) -> list:
         dense_records = dense_map.get(special_terms, [])
         dense_ranks   = {r["doc_id"]: r for r in dense_records}
 
+        # 실제 pool 크기 기반 penalty: 해당 리스트의 마지막 순위 + 1
+        bm25_penalty  = (max(bm25_ranks.values()) + 1) if bm25_ranks else 1
+        dense_penalty = (len(dense_records) + 1) if dense_records else 1
+
         all_ids = set(bm25_ranks.keys()) | set(dense_ranks.keys())
 
         scored = []
         for doc_id in all_ids:
-            b_rank = bm25_ranks.get(doc_id, 1000)
-            d_rank = dense_ranks[doc_id]["rank"] if doc_id in dense_ranks else 1000
+            b_rank = bm25_ranks.get(doc_id, bm25_penalty)
+            d_rank = dense_ranks[doc_id]["rank"] if doc_id in dense_ranks else dense_penalty
 
             score = rrf_score(b_rank, d_rank, k)
 
@@ -185,8 +189,8 @@ def run_rrf(bm25_map: dict, dense_map: dict, k: int, top_n: int) -> list:
             scored.append({
                 "doc_id"     : doc_id,
                 "rrf_score"  : round(score, 6),
-                "bm25_rank"  : b_rank if b_rank != 1000 else None,
-                "dense_rank" : d_rank if d_rank != 1000 else None,
+                "bm25_rank"  : b_rank if doc_id in bm25_ranks else None,
+                "dense_rank" : d_rank if doc_id in dense_ranks else None,
                 "doc_text"   : doc_text,
                 "summary"    : summary,
             })

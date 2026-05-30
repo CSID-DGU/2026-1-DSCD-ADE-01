@@ -723,6 +723,7 @@ def run_case_pipeline(
                 run_bm25_retrieval,
                 case=context.case,
                 expanded_queries=context.expanded_queries,
+                top_k=60,
             )
             semantic_future = pool.submit(_retrieve_semantic_results_by_embed_col)
             keyword_results = bm25_future.result()
@@ -1162,8 +1163,8 @@ def run_alpha_hybrid_reranking(
     alpha_prec: float = ALPHA_PREC,
 ) -> list[dict[str, Any]]:
     """법령/판례별 alpha를 다르게 적용한 hybrid 재랭킹.
-    법령: Score = alpha_law·norm(BM25) + (1-alpha_law)·norm(Dense)
-    판례: Score = alpha_prec·norm(BM25) + (1-alpha_prec)·norm(Dense)
+    법령/판례를 분리하여 각각 top_k개씩 독립 랭킹 후 합산.
+    → 법령과 판례가 슬롯을 경쟁하지 않아 두 도메인 recall을 모두 보장.
     """
     clause_meta: dict[int, dict[str, Any]] = {}
     bm25_scores: dict[int, dict[str, float]] = {}
@@ -1175,14 +1176,22 @@ def run_alpha_hybrid_reranking(
         rid = str(r["result_id"])
         result_lookup.setdefault((ci, rid), dict(r))
         clause_meta.setdefault(ci, {"clause": r["clause"]})
-        bm25_scores.setdefault(ci, {})[rid] = float(r.get("keyword_score", r.get("score", 0.0)))
+        new_score = float(r.get("keyword_score", r.get("score", 0.0)))
+        ci_map = bm25_scores.setdefault(ci, {})
+        # 멀티쿼리: 동일 doc이 여러 쿼리에서 나올 때 best score(최댓값) 유지
+        if rid not in ci_map or new_score > ci_map[rid]:
+            ci_map[rid] = new_score
 
     for r in semantic_results:
         ci = int(r["clause_index"])
         rid = str(r["result_id"])
         result_lookup.setdefault((ci, rid), dict(r))
         clause_meta.setdefault(ci, {"clause": r["clause"]})
-        dense_scores.setdefault(ci, {})[rid] = float(r.get("score", r.get("similarity", 0.0)))
+        new_score = float(r.get("score", r.get("similarity", 0.0)))
+        ci_map = dense_scores.setdefault(ci, {})
+        # 멀티쿼리: 동일 doc이 여러 쿼리에서 나올 때 best score(최댓값) 유지
+        if rid not in ci_map or new_score > ci_map[rid]:
+            ci_map[rid] = new_score
 
     reranked_results: list[dict[str, Any]] = []
     for ci, meta in clause_meta.items():
@@ -1190,41 +1199,49 @@ def run_alpha_hybrid_reranking(
         norm_dense = minmax_normalize(dense_scores.get(ci, {}))
 
         all_ids = set(norm_bm25) | set(norm_dense)
-        combined: list[tuple[str, float, float, float, str]] = []
+        law_scored: list[tuple[str, float, float, float]] = []
+        prec_scored: list[tuple[str, float, float, float]] = []
         for rid in all_ids:
             original = result_lookup.get((ci, rid), {})
             stype = original.get("source_type", "")
-            # 문서 타입에 따라 alpha 결정
             alpha = alpha_prec if stype == "precedent" else alpha_law
             nb = norm_bm25.get(rid, 0.0)
             nd = norm_dense.get(rid, 0.0)
             hybrid = alpha * nb + (1 - alpha) * nd
-            combined.append((rid, hybrid, nb, nd, stype))
+            if stype == "precedent":
+                prec_scored.append((rid, hybrid, nb, nd))
+            else:
+                law_scored.append((rid, hybrid, nb, nd))
 
-        combined.sort(key=lambda x: x[1], reverse=True)
-        for rank, (rid, hybrid_score, nb, nd, stype) in enumerate(combined[:top_k], 1):
-            original = result_lookup.get((ci, rid), {})
-            reranked_results.append(
-                {
-                    "clause_index": ci,
-                    "clause": meta["clause"],
-                    "result_id": rid,
-                    "source_type": stype or original.get("source_type", "document"),
-                    "document_body": original.get("document_body", ""),
-                    "document_text": original.get("document_text", ""),
-                    "metadata": original.get("metadata", {}),
-                    "keyword_rank": None,
-                    "semantic_rank": None,
-                    "keyword_score": float(bm25_scores.get(ci, {}).get(rid, 0.0)),
-                    "semantic_score": float(dense_scores.get(ci, {}).get(rid, 0.0)),
-                    "norm_bm25": nb,
-                    "norm_dense": nd,
-                    "rerank_score": hybrid_score,
-                    "score": hybrid_score,
-                    "retrieval_method": "rerank",
-                    "rank": rank,
-                }
-            )
+        # 법령/판례 각각 독립 랭킹 → 슬롯 경쟁 없이 각 도메인 top_k 보장
+        law_scored.sort(key=lambda x: x[1], reverse=True)
+        prec_scored.sort(key=lambda x: x[1], reverse=True)
+
+        for domain, scored in (("law", law_scored), ("precedent", prec_scored)):
+            for rank, (rid, hybrid_score, nb, nd) in enumerate(scored[:top_k], 1):
+                original = result_lookup.get((ci, rid), {})
+                stype = original.get("source_type", domain)
+                reranked_results.append(
+                    {
+                        "clause_index": ci,
+                        "clause": meta["clause"],
+                        "result_id": rid,
+                        "source_type": stype,
+                        "document_body": original.get("document_body", ""),
+                        "document_text": original.get("document_text", ""),
+                        "metadata": original.get("metadata", {}),
+                        "keyword_rank": None,
+                        "semantic_rank": None,
+                        "keyword_score": float(bm25_scores.get(ci, {}).get(rid, 0.0)),
+                        "semantic_score": float(dense_scores.get(ci, {}).get(rid, 0.0)),
+                        "norm_bm25": nb,
+                        "norm_dense": nd,
+                        "rerank_score": hybrid_score,
+                        "score": hybrid_score,
+                        "retrieval_method": "rerank",
+                        "rank": rank,
+                    }
+                )
     return reranked_results
 
 
@@ -1236,7 +1253,8 @@ def run_project_reranking(
 ) -> list[dict[str, Any]]:
     result_lookup: dict[tuple[int, str], dict[str, Any]] = {}
     bm25_map: dict[int, dict[str, Any]] = {}
-    dense_map: dict[str, list[dict[str, Any]]] = {}
+    # clause → {doc_id → best_record} : 멀티쿼리에서 동일 doc의 best(최고점) rank 유지
+    _dense_best: dict[str, dict[str, dict[str, Any]]] = {}
 
     for result in keyword_results:
         clause_index = int(result["clause_index"])
@@ -1245,7 +1263,10 @@ def run_project_reranking(
         bm25_item = bm25_map.setdefault(
             clause_index, {"special_terms": result["clause"], "rank_map": {}}
         )
-        bm25_item["rank_map"][result_id] = int(result["rank"])
+        cur_rank = int(result["rank"])
+        # 멀티쿼리: 동일 doc이 여러 쿼리에서 나올 때 best rank(최솟값) 유지
+        if result_id not in bm25_item["rank_map"] or cur_rank < bm25_item["rank_map"][result_id]:
+            bm25_item["rank_map"][result_id] = cur_rank
 
     for result in semantic_results:
         clause_index = int(result["clause_index"])
@@ -1255,15 +1276,27 @@ def run_project_reranking(
         bm25_map.setdefault(
             clause_index, {"special_terms": result["clause"], "rank_map": {}}
         )
-        dense_map.setdefault(result["clause"], []).append(
-            {
+        clause_text = result["clause"]
+        new_score = float(result.get("score", result.get("similarity", 0.0)))
+        new_rank = int(result["rank"])
+        clause_best = _dense_best.setdefault(clause_text, {})
+        # 멀티쿼리: 동일 doc이 여러 쿼리에서 나올 때 best score(최댓값) 유지
+        if result_id not in clause_best or new_score > clause_best[result_id]["score"]:
+            clause_best[result_id] = {
                 "doc_id": result_id,
-                "score": float(result.get("score", result.get("similarity", 0.0))),
-                "rank": int(result["rank"]),
+                "score": new_score,
+                "rank": new_rank,
                 "doc_text": result.get("document_body") or result.get("document_text", ""),
                 "summary": result.get("metadata", {}).get("judgment_summary", ""),
             }
-        )
+
+    # best record dict → 점수 내림차순 재정렬 후 rank 재부여
+    dense_map: dict[str, list[dict[str, Any]]] = {}
+    for clause_text, best_by_id in _dense_best.items():
+        sorted_records = sorted(best_by_id.values(), key=lambda r: r["score"], reverse=True)
+        for new_rank, rec in enumerate(sorted_records, 1):
+            rec["rank"] = new_rank
+        dense_map[clause_text] = sorted_records
 
     reranked_groups = project_reranker.run_rrf(bm25_map, dense_map, project_reranker.K, top_k)
     reranked_results: list[dict[str, Any]] = []
@@ -1342,7 +1375,7 @@ def calculate_recall_by_k(
     for k in DEFAULT_RECALL_K_VALUES:
         top_results = top_ranked_results(reranked_results, k)
         law_hits = count_law_hits(law_references, top_results)
-        precedent_hits = count_precedent_hits(precedent_references, top_results)
+        precedent_hits = count_precedent_hits(precedent_references, top_results, law_references)
         metrics[str(k)] = {
             "law": ratio(law_hits, law_total),
             "precedent": ratio(precedent_hits, precedent_total),
@@ -1405,6 +1438,7 @@ def count_source_candidates(results: list[dict[str, Any]]) -> dict[str, int]:
 
 def calculate_precedent_hit_flags_by_k(
     *,
+    law_references: list[dict[str, Any]],
     precedent_references: list[dict[str, Any]],
     reranked_results: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, str | bool]]]:
@@ -1412,6 +1446,7 @@ def calculate_precedent_hit_flags_by_k(
         str(k): precedent_hit_flags(
             precedent_references=precedent_references,
             results=top_ranked_results(reranked_results, k),
+            law_references=law_references,
         )
         for k in DEFAULT_RECALL_K_VALUES
     }
@@ -1482,6 +1517,7 @@ def query_hit_flags(
     precedent_ref_hits = precedent_hit_flags(
         precedent_references=precedent_references,
         results=query_results,
+        law_references=law_references,
     )
     law_hits = sum(1 for item in law_ref_hits if item["hit"])
     precedent_hits = sum(1 for item in precedent_ref_hits if item["hit"])
@@ -1531,6 +1567,7 @@ def precedent_hit_flags(
     *,
     precedent_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
+    law_references: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str | bool]]:
     result_case_numbers = [
         normalize_match_value(v)
@@ -1538,10 +1575,15 @@ def precedent_hit_flags(
         for v in precedent_match_values(result)
         if normalize_match_value(v)
     ]
+    law_overlap = (
+        _precedent_law_overlap(law_references, results) if law_references else False
+    )
     return [
         {
             "case_number": ref["case_number"],
-            "hit": reference_matches_result(ref["case_number"], result_case_numbers),
+            "hit": reference_matches_result(ref["case_number"], result_case_numbers) or law_overlap,
+            "hit_by_case_number": reference_matches_result(ref["case_number"], result_case_numbers),
+            "hit_by_law_overlap": law_overlap,
         }
         for ref in precedent_references
     ]
@@ -1554,7 +1596,7 @@ def calculate_integrated_recall(
     reranked_results: list[dict[str, Any]],
 ) -> dict[str, float | int]:
     law_hits = count_law_hits(law_references, reranked_results)
-    precedent_hits = count_precedent_hits(precedent_references, reranked_results)
+    precedent_hits = count_precedent_hits(precedent_references, reranked_results, law_references)
     law_total = len(law_references)
     precedent_total = len(precedent_references)
     total = law_total + precedent_total
@@ -1996,9 +2038,32 @@ def dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
+def _precedent_law_overlap(
+    law_references: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> bool:
+    """검색된 판례 중 하나라도 정답 법령과 공통 조문을 가지면 True."""
+    gt_law_candidates = {
+        normalize_match_value(c)
+        for ref in law_references
+        for c in law_reference_values(ref)
+        if normalize_match_value(c)
+    }
+    if not gt_law_candidates:
+        return False
+    retrieved_citations = {
+        normalize_match_value(v)
+        for result in results
+        for v in precedent_reference_law_values(result)
+        if normalize_match_value(v)
+    }
+    return bool(gt_law_candidates & retrieved_citations)
+
+
 def count_precedent_hits(
     precedent_references: list[dict[str, Any]],
     results: list[dict[str, Any]],
+    law_references: list[dict[str, Any]] | None = None,
 ) -> int:
     result_case_numbers = [
         normalize_match_value(v)
@@ -2006,9 +2071,13 @@ def count_precedent_hits(
         for v in precedent_match_values(result)
         if normalize_match_value(v)
     ]
+    # 참조조문 기준: 검색된 판례가 정답 법령을 인용하면 hit로 인정
+    law_overlap = (
+        _precedent_law_overlap(law_references, results) if law_references else False
+    )
     return sum(
         1 for ref in precedent_references
-        if reference_matches_result(ref["case_number"], result_case_numbers)
+        if reference_matches_result(ref["case_number"], result_case_numbers) or law_overlap
     )
 
 
@@ -2249,6 +2318,7 @@ def case_report_payload(context: CaseExecutionContext) -> dict[str, Any]:
         reranked_results=context.reranked_results,
     )
     precedent_hit_flags_by_k = calculate_precedent_hit_flags_by_k(
+        law_references=case["law_references"],
         precedent_references=case["precedent_references"],
         reranked_results=context.reranked_results,
     )
