@@ -94,9 +94,9 @@ PRECEDENT_SEMANTIC_EMBED_COL = SEMANTIC_EMBED_CONFIGS[DEFAULT_SEMANTIC_EMBED_COL
 RERANKERS = ["alpha_hybrid"]
 
 # Alpha hybrid — 법령/판례 각각 BM25 가중치 (1-α = Dense 가중치)
-# 법령: Dense 우세 → α 낮게 / 판례: BM25 우세 → α 높게
-ALPHA_LAW  = 0.2   # 법령: BM25 20% + Dense 80%
-ALPHA_PREC = 0.6   # 판례: BM25 60% + Dense 40%
+# 분리 reranking + sweep 최적값 (alpha_sweep_2d_20260530_235115)
+ALPHA_LAW  = 0.20  # 법령: BM25 20% + Dense 80%
+ALPHA_PREC = 0.70  # 판례: BM25 70% + Dense 30%
 
 # vertex 모델로 고정
 EMBED_WORKERS = 1

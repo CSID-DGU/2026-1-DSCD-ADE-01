@@ -85,8 +85,8 @@ def run_alpha_hybrid(
     top_k: int = 20,
 ) -> list[dict[str, Any]]:
     """법령/판례별 alpha를 적용한 hybrid 리랭킹.
-    1D 모드: alpha_law == alpha_prec 로 호출
-    2D 모드: alpha_law != alpha_prec 가능
+    법령/판례를 분리하여 각각 top_k개씩 독립 랭킹 후 합산.
+    → 법령과 판례가 슬롯을 경쟁하지 않아 두 도메인 recall을 모두 보장.
     """
     clause_indices: set[int] = set()
     for r in keyword_results + semantic_results:
@@ -105,8 +105,9 @@ def run_alpha_hybrid(
             if rid not in result_map:
                 result_map[rid] = dict(r)
                 result_map[rid]["dense_score_raw"] = 0.0
-            result_map[rid]["bm25_score_raw"] = float(
-                r.get("keyword_score", r.get("score", 0.0))
+            result_map[rid]["bm25_score_raw"] = max(
+                result_map[rid].get("bm25_score_raw", 0.0),
+                float(r.get("keyword_score", r.get("score", 0.0))),
             )
 
         for r in dense_clause:
@@ -114,32 +115,39 @@ def run_alpha_hybrid(
             if rid not in result_map:
                 result_map[rid] = dict(r)
                 result_map[rid]["bm25_score_raw"] = 0.0
-            result_map[rid]["dense_score_raw"] = float(
-                r.get("semantic_score", r.get("similarity", r.get("score", 0.0)))
+            result_map[rid]["dense_score_raw"] = max(
+                result_map[rid].get("dense_score_raw", 0.0),
+                float(r.get("semantic_score", r.get("similarity", r.get("score", 0.0)))),
             )
 
         if not result_map:
             continue
 
-        # dict 기반 min-max 정규화 (legal_retrieval_eval_multi.minmax_normalize 공유)
         norm_bm25 = minmax_normalize({rid: e["bm25_score_raw"] for rid, e in result_map.items()})
         norm_dense = minmax_normalize({rid: e["dense_score_raw"] for rid, e in result_map.items()})
 
-        scored: list[tuple[float, str, dict[str, Any]]] = []
+        law_scored: list[tuple[float, str, dict[str, Any]]] = []
+        prec_scored: list[tuple[float, str, dict[str, Any]]] = []
         for rid, entry in result_map.items():
             stype = entry.get("source_type", "")
             alpha = alpha_prec if stype == "precedent" else alpha_law
             combined = alpha * norm_bm25.get(rid, 0.0) + (1.0 - alpha) * norm_dense.get(rid, 0.0)
-            scored.append((combined, rid, entry))
+            if stype == "precedent":
+                prec_scored.append((combined, rid, entry))
+            else:
+                law_scored.append((combined, rid, entry))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        # 법령/판례 각각 독립 랭킹 → 슬롯 경쟁 없이 각 도메인 top_k 보장
+        law_scored.sort(key=lambda x: x[0], reverse=True)
+        prec_scored.sort(key=lambda x: x[0], reverse=True)
 
-        for rank, (score, _rid, entry) in enumerate(scored[:top_k], 1):
-            result = dict(entry)
-            result["rank"] = rank
-            result["score"] = round(score, 8)
-            result["clause_index"] = clause_idx
-            all_results.append(result)
+        for domain_scored in (law_scored, prec_scored):
+            for rank, (score, _rid, entry) in enumerate(domain_scored[:top_k], 1):
+                result = dict(entry)
+                result["rank"] = rank
+                result["score"] = round(score, 8)
+                result["clause_index"] = clause_idx
+                all_results.append(result)
 
     return all_results
 
