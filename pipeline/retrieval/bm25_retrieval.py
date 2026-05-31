@@ -25,19 +25,18 @@ import json
 import time
 import pandas as pd
 from rank_bm25 import BM25Okapi
-import kiwipiepy_model
-from kiwipiepy import Kiwi
 from pathlib import Path
-from sqlalchemy import text
 
-# ─── 프로젝트 루트를 sys.path에 추가 (shared 모듈 접근용) ──────────
-_BASE = Path(__file__).resolve().parent
-sys.path.insert(0, str(_BASE.parents[1]))  # 프로젝트 루트
-from shared.db.connection import get_db_client
+# ─── 프로젝트 루트를 sys.path에 추가 ──────────────────────────────
+_BASE        = Path(__file__).resolve().parent
+_PROJECT_ROOT = _BASE.parents[1]
+sys.path.insert(0, str(_PROJECT_ROOT))
 
 # ─── 경로 설정 ──────────────────────────────────────────────────────
 _DATA   = _BASE / "data"
 _OUTPUT = _BASE / "output"
+_CSV_LAW      = _PROJECT_ROOT / "data" / "raw" / "law_child_vertex.csv"
+_CSV_CASE_LAW = _PROJECT_ROOT / "data" / "raw" / "case_law_with_embeddings_vertex.csv"
 
 TOP_K_CASE = 20
 TOP_K_LAW  = 20
@@ -87,18 +86,28 @@ def parse_args() -> argparse.Namespace:
 
 
 # ── Kiwi 초기화 (corpus 토크나이징 전용) ────────────────────────────
-kiwi = Kiwi(model_path=str(Path(kiwipiepy_model.__file__).parent))
+try:
+    import kiwipiepy_model
+    from kiwipiepy import Kiwi
+    kiwi = Kiwi(model_path=str(Path(kiwipiepy_model.__file__).parent))
+    _KIWI_OK = True
+except Exception as e:
+    print(f"[경고] Kiwi 초기화 실패: {e} → 공백 분리 토크나이저로 대체")
+    kiwi = None
+    _KIWI_OK = False
 
 def tokenize(text: str) -> list[str]:
-    """corpus(법령·판례 문서) 토크나이징 전용 — 형태소 분석"""
+    """corpus(법령·판례 문서) 토크나이징 전용 — 형태소 분석 or 공백 분리"""
     if not text or not text.strip():
         return []
-    tokens = [
-        token.form
-        for token in kiwi.tokenize(text)
-        if token.tag in POS_FILTER
-    ]
-    return tokens if tokens else text.split()
+    if _KIWI_OK and kiwi is not None:
+        tokens = [
+            token.form
+            for token in kiwi.tokenize(text)
+            if token.tag in POS_FILTER
+        ]
+        return tokens if tokens else text.split()
+    return text.split()
 
 def build_query_tokens(keywords: list[str]) -> list[str]:
     """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드(공백 제거) 보너스"""
@@ -109,51 +118,42 @@ def build_query_tokens(keywords: list[str]) -> list[str]:
     return list(dict.fromkeys(tokens))     # 순서 유지 중복 제거
 
 
-# ── DB 데이터 로드 ───────────────────────────────────────────────────
+# ── 데이터 로드 (CSV) ────────────────────────────────────────────────
 def load_case_law_from_db() -> pd.DataFrame:
     """
-    DB의 case_law 테이블에서 판례 데이터 로드.
+    판례 데이터 로드 (CSV 파일).
     BM25 타겟 컬럼(bm25_target)은 issue + judgment_summary 결합으로 생성.
     """
     t0 = time.time()
-    print(f"▶ [판례] DB 로드 중... (테이블: {CASE_TABLE})", end=" ", flush=True)
+    print(f"▶ [판례] CSV 로드 중... ({_CSV_CASE_LAW.name})", end=" ", flush=True)
 
-    db   = get_db_client()
-    rows = db.fetch_all(
-        text(f"SELECT {CASE_COLS} FROM {CASE_TABLE}")
-    )
-    if not rows:
-        raise ValueError(f"테이블 '{CASE_TABLE}'에서 데이터를 가져오지 못했습니다.")
+    df = pd.read_csv(_CSV_CASE_LAW, encoding="utf-8-sig",
+                     usecols=lambda c: c in {
+                         "case_id", "case_name", "case_number",
+                         "judgment_date", "court_name", "issue", "judgment_summary"
+                     })
 
-    df = pd.DataFrame(rows)
-
-    # BM25 검색 대상 텍스트: issue + judgment_summary 결합
     df["bm25_target"] = (
         df["issue"].fillna("") + " " + df["judgment_summary"].fillna("")
     ).str.strip()
 
-    # bm25_target이 비어있는 행 제거
     df_valid = df[df["bm25_target"].str.len() > 0].reset_index(drop=True)
-
     print(f"완료 ({len(df_valid)}행 유효 / 전체 {len(df)}행, {time.time()-t0:.1f}초)")
     return df_valid
 
 
 def load_law_child_from_db() -> pd.DataFrame:
     """
-    DB의 law_child 테이블에서 법령 데이터 로드.
+    법령 데이터 로드 (CSV 파일).
     """
     t0 = time.time()
-    print(f"▶ [법령] DB 로드 중... (테이블: {LAW_TABLE})", end=" ", flush=True)
+    print(f"▶ [법령] CSV 로드 중... ({_CSV_LAW.name})", end=" ", flush=True)
 
-    db   = get_db_client()
-    rows = db.fetch_all(
-        text(f"SELECT {LAW_COLS} FROM {LAW_TABLE}")
-    )
-    if not rows:
-        raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터를 가져오지 못했습니다.")
-
-    df = pd.DataFrame(rows)
+    df = pd.read_csv(_CSV_LAW, encoding="utf-8-sig",
+                     usecols=lambda c: c in {
+                         "clause_key", "law_name", "article_no",
+                         "paragraph_no", "child_text"
+                     })
     df["child_text"] = df["child_text"].fillna("").astype(str)
 
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")

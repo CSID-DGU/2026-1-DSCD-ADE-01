@@ -281,11 +281,11 @@ def load_chunks(
     print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True,)
     base_dir = Path(__file__).resolve().parents[2]
     if table_name == LAW_TABLE:
-        csv_path = (base_dir/"data"/"raw"/"law_child.csv")
+        csv_path = (base_dir/"data"/"raw"/"law_child_vertex.csv")
 
     elif table_name == PREC_TABLE:
 
-        csv_path = (base_dir/"output"/"case_law_with_embeddings.csv")
+        csv_path = (base_dir/"data"/"raw"/"case_law_with_embeddings_vertex.csv")
 
     else:
         raise ValueError(f"알 수 없는 테이블: {table_name}")
