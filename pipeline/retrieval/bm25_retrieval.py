@@ -121,51 +121,56 @@ def build_query_tokens(keywords: list[str]) -> list[str]:
     return list(dict.fromkeys(tokens))     # 순서 유지 중복 제거
 
 
-# ── 데이터 로드 (DB) ─────────────────────────────────────────────────
+# ── CSV 경로 (DB 폴백용) ─────────────────────────────────────────────
+_CSV_CASE_LAW = _PROJECT_ROOT / "data" / "raw" / "case_law_with_embeddings_vertex.csv"
+_CSV_LAW      = _PROJECT_ROOT / "data" / "raw" / "law_child_vertex.csv"
+
+_CASE_CSV_COLS = {"case_id", "case_name", "case_number", "judgment_date", "court_name", "issue", "judgment_summary"}
+_LAW_CSV_COLS  = {"clause_key", "law_name", "article_no", "paragraph_no", "child_text"}
+
+
+# ── 데이터 로드 (DB 우선, CSV 폴백) ─────────────────────────────────
 def load_case_law_from_db() -> pd.DataFrame:
-    """
-    판례 데이터 로드 (Cloud SQL).
-    BM25 타겟 컬럼(bm25_target)은 issue + judgment_summary 결합으로 생성.
-    """
+    """판례 로드: Cloud SQL 우선, 접근 불가 시 CSV 폴백."""
     t0 = time.time()
     print(f"▶ [판례] DB 로드 중... ({CASE_TABLE})", end=" ", flush=True)
+    try:
+        db = get_db_client()
+        rows = db.fetch_all(text(f"SELECT {CASE_COLS} FROM {CASE_TABLE}"))
+        if not rows:
+            raise ValueError(f"테이블 '{CASE_TABLE}'에서 데이터 없음")
+        df = pd.DataFrame(rows)
+        print(f"(DB) ", end="", flush=True)
+    except Exception as e:
+        print(f"\n  [경고] DB 연결 실패 ({e.__class__.__name__}), CSV 폴백: {_CSV_CASE_LAW.name}", flush=True)
+        df = pd.read_csv(_CSV_CASE_LAW, encoding="utf-8-sig",
+                         usecols=lambda c: c in _CASE_CSV_COLS)
 
-    db = get_db_client()
-    rows = db.fetch_all(
-        text(f"SELECT {CASE_COLS} FROM {CASE_TABLE}")
-    )
-
-    if not rows:
-        raise ValueError(f"테이블 '{CASE_TABLE}'에서 데이터 없음")
-
-    df = pd.DataFrame(rows)
     df["bm25_target"] = (
         df["issue"].fillna("") + " " + df["judgment_summary"].fillna("")
     ).str.strip()
-
     df_valid = df[df["bm25_target"].str.len() > 0].reset_index(drop=True)
     print(f"완료 ({len(df_valid)}행 유효 / 전체 {len(df)}행, {time.time()-t0:.1f}초)")
     return df_valid
 
 
 def load_law_child_from_db() -> pd.DataFrame:
-    """
-    법령 데이터 로드 (Cloud SQL).
-    """
+    """법령 로드: Cloud SQL 우선, 접근 불가 시 CSV 폴백."""
     t0 = time.time()
     print(f"▶ [법령] DB 로드 중... ({LAW_TABLE})", end=" ", flush=True)
+    try:
+        db = get_db_client()
+        rows = db.fetch_all(text(f"SELECT {LAW_COLS} FROM {LAW_TABLE}"))
+        if not rows:
+            raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터 없음")
+        df = pd.DataFrame(rows)
+        print(f"(DB) ", end="", flush=True)
+    except Exception as e:
+        print(f"\n  [경고] DB 연결 실패 ({e.__class__.__name__}), CSV 폴백: {_CSV_LAW.name}", flush=True)
+        df = pd.read_csv(_CSV_LAW, encoding="utf-8-sig",
+                         usecols=lambda c: c in _LAW_CSV_COLS)
 
-    db = get_db_client()
-    rows = db.fetch_all(
-        text(f"SELECT {LAW_COLS} FROM {LAW_TABLE}")
-    )
-
-    if not rows:
-        raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터 없음")
-
-    df = pd.DataFrame(rows)
     df["child_text"] = df["child_text"].fillna("").astype(str)
-
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df
 

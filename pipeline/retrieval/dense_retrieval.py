@@ -165,10 +165,16 @@ def embed_query(query_text: str, embed_col: str) -> np.ndarray:
 
 
 # ============================================
-# DB 로드 + 임베딩 파싱
+# DB 로드 + 임베딩 파싱 (DB 우선, CSV 폴백)
 # ============================================
+_CSV_PATHS = {
+    LAW_TABLE:  Path(__file__).resolve().parents[2] / "data" / "raw" / "law_child_vertex.csv",
+    PREC_TABLE: Path(__file__).resolve().parents[2] / "data" / "raw" / "case_law_with_embeddings_vertex.csv",
+}
+
+
 def parse_embedding(value) -> np.ndarray:
-    """pgvector '[0.1,0.2,...]' 또는 list 형식을 ndarray로 변환."""
+    """pgvector '[0.1,0.2,...]' / CSV JSON 문자열 / list 형식을 ndarray로 변환."""
     if isinstance(value, list):
         return np.array(value, dtype=np.float32)
     if isinstance(value, str):
@@ -186,22 +192,32 @@ def load_chunks(
     t0 = time.time()
     print(f"  로딩: {table_name} [{embed_col}] ...", end=" ", flush=True)
 
-    db = get_db_client()
-    select_cols = ", ".join(keep_cols + [embed_col])
-    where = f"{embed_col} IS NOT NULL"
-    if extra_filter:
-        where += f" AND {extra_filter}"
-    rows = db.fetch_all(
-        text(f"SELECT {select_cols} FROM {table_name} WHERE {where}"),
-    )
+    # ── DB 우선 ──────────────────────────────────────────────────────
+    try:
+        db = get_db_client()
+        select_cols = ", ".join(keep_cols + [embed_col])
+        where = f"{embed_col} IS NOT NULL"
+        if extra_filter:
+            where += f" AND {extra_filter}"
+        rows = db.fetch_all(text(f"SELECT {select_cols} FROM {table_name} WHERE {where}"))
+        if not rows:
+            raise ValueError(f"테이블 '{table_name}'에서 데이터 없음")
+        df = pd.DataFrame(rows)
+        print(f"(DB) ", end="", flush=True)
 
-    if not rows:
-        raise ValueError(f"테이블 '{table_name}'에서 데이터 없음")
+    # ── CSV 폴백 ─────────────────────────────────────────────────────
+    except Exception as e:
+        csv_path = _CSV_PATHS.get(table_name)
+        if csv_path is None or not csv_path.exists():
+            raise ValueError(f"DB 연결 실패 + CSV 없음: {table_name}") from e
+        print(f"\n  [경고] DB 연결 실패 ({e.__class__.__name__}), CSV 폴백: {csv_path.name}", flush=True)
+        df = pd.read_csv(csv_path, encoding="utf-8-sig")
+        df = df[df[embed_col].notna()].reset_index(drop=True)
+        if df.empty:
+            raise ValueError(f"{embed_col} 데이터 없음 (CSV)") from e
 
-    df = pd.DataFrame(rows)
     df["_vec"] = df[embed_col].apply(parse_embedding)
     df = df[keep_cols + ["_vec"]]
-
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df
 
