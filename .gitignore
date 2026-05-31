@@ -12,6 +12,7 @@ evaluation/results/
 keyword_analysis_output/
 output/
 *.log
+*.txt
 
 # Python
 __pycache__/
@@ -41,3 +42,4 @@ tests/pipeline/query_expansion_v1/
 
 # test
 tests/
+/scripts/db_peek.py

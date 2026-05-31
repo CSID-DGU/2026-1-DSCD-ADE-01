@@ -41,12 +41,12 @@ MIN_SIMILARITY = 0.2
 LAW_TABLE  = "law_child"
 PREC_TABLE = "case_law"
 
-LAW_KEEP_COLS  = ["clause_key", "law_name", "article_key", "child_text"]
-PREC_KEEP_COLS = ["case_id", "case_name", "judgment_summary"]
+LAW_KEEP_COLS  = ["clause_key", "law_name", "article_no", "paragraph_no", "article_key", "child_text"]
+PREC_KEEP_COLS = ["case_id", "case_name", "case_number", "judgment_summary", "referenced_law"]
 
 # DB SELECT 쿼리
-_LAW_SELECT  = "clause_key, law_name, article_key, child_text, embed_vertex"
-_PREC_SELECT = "case_id, case_name, judgment_summary, embed_vertex"
+_LAW_SELECT  = "clause_key, law_name, article_no, paragraph_no, article_key, child_text, embed_vertex"
+_PREC_SELECT = "case_id, case_name, case_number, judgment_summary, referenced_law, embed_vertex"
 
 # ── 모델 캐시 ─────────────────────────────────────────────────────────────────
 _vertex_model: TextEmbeddingModel | None = None
@@ -110,11 +110,9 @@ def load_chunks(
     if table_name == LAW_TABLE:
         select_cols = _LAW_SELECT
         default_keep = LAW_KEEP_COLS
-        label = "법령"
     elif table_name == PREC_TABLE:
         select_cols = _PREC_SELECT
         default_keep = PREC_KEEP_COLS
-        label = "판례"
     else:
         raise ValueError(f"알 수 없는 테이블: {table_name}")
 

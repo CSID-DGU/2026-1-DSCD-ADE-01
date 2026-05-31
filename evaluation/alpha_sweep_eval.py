@@ -7,8 +7,14 @@
     # 1D sweep (step 0.1)
     python evaluation/alpha_sweep_eval.py --embed-col embed_kure --mode 1d --alpha-step 0.1 --top-k 10
 
-    # 2D sweep (step 0.2)
-    python evaluation/alpha_sweep_eval.py --embed-col embed_kure --mode 2d --alpha-step 0.2 --top-k 10
+    # 2D sweep (step 0.1, QE 캐시 사용)
+    python evaluation/alpha_sweep_eval.py --embed-col embed_vertex --mode 2d --alpha-step 0.1 --top-k 10 \\
+        --qe-cache evaluation/results/multi_return_qe_full_best_exp1_20260525_200829.json
+
+    # 2D sweep 소수 둘째자리 (step 0.01, QE 캐시 필수)
+    python evaluation/alpha_sweep_eval.py --embed-col embed_vertex --mode 2d --alpha-step 0.01 \\
+        --alpha-start 0.1 --alpha-end 0.5 --top-k 10 \\
+        --qe-cache evaluation/results/multi_return_qe_full_best_exp1_20260525_200829.json
 """
 
 from __future__ import annotations
@@ -51,7 +57,7 @@ from pipeline.retrieval import dense_retrieval
 from pipeline.retrieval.dense_retrieval import LAW_TABLE, PREC_TABLE
 from pipeline.retrieval.evaluation_retrieval import expand_case_queries_with_llm
 
-# 청크 캐시 (케이스마다 CSV 재로드 방지)
+# 청크 캐시 (케이스마다 DB 재로드 방지)
 _law_chunks  = None
 _prec_chunks = None
 _chunks_lock = threading.Lock()
@@ -79,8 +85,8 @@ def run_alpha_hybrid(
     top_k: int = 20,
 ) -> list[dict[str, Any]]:
     """법령/판례별 alpha를 적용한 hybrid 리랭킹.
-    1D 모드: alpha_law == alpha_prec 로 호출
-    2D 모드: alpha_law != alpha_prec 가능
+    법령/판례를 분리하여 각각 top_k개씩 독립 랭킹 후 합산.
+    → 법령과 판례가 슬롯을 경쟁하지 않아 두 도메인 recall을 모두 보장.
     """
     clause_indices: set[int] = set()
     for r in keyword_results + semantic_results:
@@ -99,8 +105,9 @@ def run_alpha_hybrid(
             if rid not in result_map:
                 result_map[rid] = dict(r)
                 result_map[rid]["dense_score_raw"] = 0.0
-            result_map[rid]["bm25_score_raw"] = float(
-                r.get("keyword_score", r.get("score", 0.0))
+            result_map[rid]["bm25_score_raw"] = max(
+                result_map[rid].get("bm25_score_raw", 0.0),
+                float(r.get("keyword_score", r.get("score", 0.0))),
             )
 
         for r in dense_clause:
@@ -108,32 +115,39 @@ def run_alpha_hybrid(
             if rid not in result_map:
                 result_map[rid] = dict(r)
                 result_map[rid]["bm25_score_raw"] = 0.0
-            result_map[rid]["dense_score_raw"] = float(
-                r.get("semantic_score", r.get("similarity", r.get("score", 0.0)))
+            result_map[rid]["dense_score_raw"] = max(
+                result_map[rid].get("dense_score_raw", 0.0),
+                float(r.get("semantic_score", r.get("similarity", r.get("score", 0.0)))),
             )
 
         if not result_map:
             continue
 
-        # dict 기반 min-max 정규화 (legal_retrieval_eval_multi.minmax_normalize 공유)
         norm_bm25 = minmax_normalize({rid: e["bm25_score_raw"] for rid, e in result_map.items()})
         norm_dense = minmax_normalize({rid: e["dense_score_raw"] for rid, e in result_map.items()})
 
-        scored: list[tuple[float, str, dict[str, Any]]] = []
+        law_scored: list[tuple[float, str, dict[str, Any]]] = []
+        prec_scored: list[tuple[float, str, dict[str, Any]]] = []
         for rid, entry in result_map.items():
             stype = entry.get("source_type", "")
             alpha = alpha_prec if stype == "precedent" else alpha_law
             combined = alpha * norm_bm25.get(rid, 0.0) + (1.0 - alpha) * norm_dense.get(rid, 0.0)
-            scored.append((combined, rid, entry))
+            if stype == "precedent":
+                prec_scored.append((combined, rid, entry))
+            else:
+                law_scored.append((combined, rid, entry))
 
-        scored.sort(key=lambda x: x[0], reverse=True)
+        # 법령/판례 각각 독립 랭킹 → 슬롯 경쟁 없이 각 도메인 top_k 보장
+        law_scored.sort(key=lambda x: x[0], reverse=True)
+        prec_scored.sort(key=lambda x: x[0], reverse=True)
 
-        for rank, (score, _rid, entry) in enumerate(scored[:top_k], 1):
-            result = dict(entry)
-            result["rank"] = rank
-            result["score"] = round(score, 8)
-            result["clause_index"] = clause_idx
-            all_results.append(result)
+        for domain_scored in (law_scored, prec_scored):
+            for rank, (score, _rid, entry) in enumerate(domain_scored[:top_k], 1):
+                result = dict(entry)
+                result["rank"] = rank
+                result["score"] = round(score, 8)
+                result["clause_index"] = clause_idx
+                all_results.append(result)
 
     return all_results
 
@@ -154,9 +168,8 @@ def evaluate_case(
     expand_fn=None,
 ) -> dict[str, Any]:
     """BM25+Dense를 1회 수행 후 모든 (alpha_law, alpha_prec) 조합을 평가."""
-    if expand_fn is None:
-        expand_fn = expand_case_queries_with_llm
-    expanded_queries = expand_fn(case)
+    _expand = expand_fn if expand_fn is not None else expand_case_queries_with_llm
+    expanded_queries = _expand(case)
 
     keyword_results = run_bm25_retrieval(
         case=case, expanded_queries=expanded_queries, top_k=bm25_top_k,
@@ -200,7 +213,7 @@ def evaluate_case(
 
     alpha_metrics: dict[str, dict[str, Any]] = {}
     for al, ap in alpha_pairs:
-        key = _pair_key(al, ap)
+        pair_key = _pair_key(al, ap)
         reranked = run_alpha_hybrid(
             keyword_results=keyword_results,
             semantic_results=semantic_results,
@@ -210,7 +223,7 @@ def evaluate_case(
             law_references=law_refs, precedent_references=prec_refs,
             reranked_results=reranked,
         )
-        alpha_metrics[key] = {"recall_by_k": recall_by_k}
+        alpha_metrics[pair_key] = {"recall_by_k": recall_by_k}
 
     return {
         "case_id":           case["case_id"],
@@ -374,15 +387,15 @@ def run_sweep(
     cases = select_cases(dataset, case_id)
     log_progress(f"dataset_loaded cases={len(cases)}")
 
-    load_bm25_corpus()
-    _get_chunks()  # 병렬 실행 전 사전 로드
-
     if qe_cache_path is not None:
         cache = load_qe_cache(qe_cache_path)
         expand_fn = make_cached_expand_fn(cache)
         log_progress(f"qe_cache_loaded path={qe_cache_path} entries={len(cache)}")
     else:
-        expand_fn = expand_case_queries_with_llm
+        expand_fn = None
+
+    load_bm25_corpus()
+    _get_chunks()  # 병렬 실행 전 사전 로드
 
     case_results: list[dict[str, Any]] = [None] * len(cases)  # 순서 보존용
     completed = 0
@@ -465,7 +478,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--alpha-start", type=float, default=0.0)
     parser.add_argument("--alpha-end",   type=float, default=1.0)
     parser.add_argument("--alpha-step",  type=float, default=0.1,
-                        help="alpha 간격 (1d: 11단계, 2d: step=0.2 추천 → 6×6=36 조합)")
+                        help="alpha 간격. 소수 둘째자리: 0.01 (QE 캐시 사용 권장). 2d step=0.1 → 11×11=121 조합")
     parser.add_argument("--top-k",     type=int, default=20,
                         help="최종 리랭킹 후 반환할 문서 수 (default: 20)")
     parser.add_argument("--primary-k", type=int, default=10,
@@ -481,9 +494,8 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         default=None,
         help=(
-            "이전 실행 결과 JSON 경로. "
-            "지정 시 QE LLM 호출을 스킵하고 캐시된 expanded_queries를 재사용합니다. "
-            "캐시에 없는 case_id는 LLM을 호출합니다."
+            "이전 실행 결과 JSON 경로. 지정 시 QE LLM 호출을 스킵하고 캐시된 "
+            "expanded_queries를 재사용합니다. 캐시 미스 시 LLM 폴백."
         ),
     )
     return parser.parse_args()

@@ -23,6 +23,7 @@ import sys
 import argparse
 import json
 import time
+import os
 import pandas as pd
 from rank_bm25 import BM25Okapi
 import kiwipiepy_model
@@ -42,15 +43,24 @@ _OUTPUT = _BASE / "output"
 TOP_K_CASE = 20
 TOP_K_LAW  = 20
 POS_FILTER = {"NNG", "NNP", "VV", "VA", "XR"}
+INCLUDE_CLAUSE_KEY_IN_LAW_BM25 = os.getenv("BM25_LAW_INCLUDE_CLAUSE_KEY", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 # ─── DB 테이블 및 컬럼 상수 ─────────────────────────────────────────
 # 판례: case_law 테이블에서 필요한 컬럼만 SELECT
 CASE_TABLE = "case_law"
-CASE_COLS  = "case_id, case_name, case_number, judgment_date, court_name, issue, judgment_summary"
+CASE_COLS  = (
+    "case_id, case_name, case_number, judgment_date, court_name, "
+    "issue, judgment_summary, referenced_law"
+)
 
 # 법령: law_child 테이블에서 필요한 컬럼만 SELECT
 LAW_TABLE = "law_child"
-LAW_COLS  = "clause_key, law_name, article_no, paragraph_no, child_text, parent_text"
+
 LAW_COLS = """c.clause_key, c.law_name, c.article_no, c.paragraph_no, c.article_key, c.child_text, p.parent_text"""
 
 
@@ -101,12 +111,13 @@ def tokenize(text: str) -> list[str]:
     return tokens if tokens else text.split()
 
 def build_query_tokens(keywords: list[str]) -> list[str]:
-    """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드(공백 제거) 보너스"""
+    """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드 변형 보너스"""
     tokens = []
     for kw in keywords:
-        tokens.extend(tokenize(kw))        # corpus와 같은 토큰 공간
-        tokens.append(kw.replace(" ", "")) # raw 보너스
-    return list(dict.fromkeys(tokens))     # 순서 유지 중복 제거
+        tokens.extend(tokenize(kw))         # corpus와 같은 토큰 공간
+        tokens.append(kw.replace(" ", ""))  # 공백 제거형
+        tokens.append(kw.replace(" ", "_")) # clause_key 언더스코어형 (BM25 타겟 직접 매칭)
+    return list(dict.fromkeys(tokens))      # 순서 유지 중복 제거
 
 
 # ── DB 데이터 로드 ───────────────────────────────────────────────────
@@ -161,7 +172,14 @@ def load_law_child_from_db() -> pd.DataFrame:
     df = pd.DataFrame(rows)
     df["child_text"] = df["child_text"].fillna("").astype(str)
     df["parent_text"] = df["parent_text"].fillna("").astype(str)
-    df["bm25_target"] = (df["parent_text"] + " " + df["child_text"]).str.strip()
+    if INCLUDE_CLAUSE_KEY_IN_LAW_BM25:
+        df["bm25_target"] = (
+            df["clause_key"].fillna("").astype(str) + " " +
+            df["parent_text"] + " " +
+            df["child_text"]
+        ).str.strip()
+    else:
+        df["bm25_target"] = (df["parent_text"] + " " + df["child_text"]).str.strip()
 
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df

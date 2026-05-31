@@ -10,7 +10,7 @@ from pathlib import Path
 from rank_bm25 import BM25Okapi
 
 CLAUSE_WORKERS = 4   # 특약 동시 처리 수 (API rate limit에 맞게 조절)
-EMBED_WORKERS = 2    # embed_vertex + embed_kure 병렬 처리
+EMBED_WORKERS = 1    # dense_retrieval: embed_vertex only
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -36,8 +36,8 @@ EVAL_SET_PATH = Path(__file__).resolve().parent / "eval_set.json"
 TOP_K = 20
 RRF_K = 60
 RECALL_K_VALUES = [1, 3, 5, 10, 20]
-EMBED_COLS = ["embed_vertex", "embed_kure"]
-LAW_KEEP_COLS = ["clause_key", "child_text"]
+EMBED_COLS = ["embed_vertex"]
+LAW_KEEP_COLS = ["clause_key", "law_name", "article_no", "paragraph_no", "child_text"]
 PREC_KEEP_COLS = ["case_id", "case_number", "judgment_summary"]
 
 
@@ -48,7 +48,10 @@ def load_corpus() -> dict:
     prec_df = load_case_law_from_db()
 
     law_docs = [
-        {"clause_key": str(r["clause_key"]), "text": str(r["child_text"] or "")}
+        {
+            "clause_key": str(r["clause_key"]),
+            "text": str(r.get("bm25_target") or r.get("child_text") or ""),
+        }
         for _, r in law_df.iterrows()
     ]
     prec_docs = [
@@ -82,7 +85,7 @@ def load_corpus() -> dict:
 def retrieve_clause(clause: str, corpus: dict) -> dict:
     """단일 특약에 대해 Query Expansion → BM25 → Dense → RRF를 실행한다."""
     # Query Expansion
-    expansion = expand_clause(clause)
+    expansion = expand_clause(clause, overfit_mode=True)
     payload = build_retrieval_payload(expansion, clause_text=clause)
     log.info("    QE keywords: %s", payload["bm25_keywords"])
 
@@ -103,7 +106,7 @@ def retrieve_clause(clause: str, corpus: dict) -> dict:
         sum(1 for _, st in bm25_hits.values() if st == "precedent"),
     )
 
-    # Dense (embed_vertex + embed_kure 병렬 임베딩, 동일 doc_id는 최고 rank 유지)
+    # Dense (embed_vertex, 동일 doc_id는 최고 rank 유지)
     def _embed_and_search(col: str) -> list[tuple[str, int, str]]:
         query_vec = dense_retrieval.embed_query(payload["dense_query"], col)
         hits = []
