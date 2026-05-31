@@ -14,17 +14,10 @@ qa_structured_1754 단건 평가 파이프라인:
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-
-from dotenv import load_dotenv
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
-
-load_dotenv()
 
 # ── 경로 설정 ─────────────────────────────────────────────────────────────────
 PROJECT_ROOT   = Path(__file__).resolve().parents[1]
@@ -37,10 +30,11 @@ REPORTS_DIR    = CONTRACT_FILE.parent / "reports"
 COMMON_TERMS_COUNT = 6
 GEN_MODEL          = "gemini-2.5-pro"
 
-# ── Vertex AI 초기화 ──────────────────────────────────────────────────────────
-PROJECT_ID = os.getenv("GCP_PROJECT_ID")
-LOCATION   = os.getenv("GCP_LOCATION", "us-central1")
-vertexai.init(project=PROJECT_ID, location=LOCATION)
+# ── shared/llm 클라이언트 ────────────────────────────────────────────────────
+sys.path.insert(0, str(PROJECT_ROOT))
+from shared.llm.gemini_client import GeminiClient
+
+_judge_client = GeminiClient(model=GEN_MODEL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,10 +111,11 @@ def step2_run_retrieval(eval_input: Path) -> Path:
     cmd = [
         sys.executable,
         str(EVAL_DIR / "legal_retrieval_eval_multi.py"),
-        "--input",       str(eval_input),
-        "--output",      output_name,
-        "--case-id",     CONTRACT_ID,
-        "--case-workers", "1",
+        "--input",               str(eval_input),
+        "--output",              output_name,
+        "--case-id",             CONTRACT_ID,
+        "--case-workers",        "1",
+        "--semantic-embed-cols", "embed_vertex",  # CSV에 embed_vertex만 존재
     ]
     print(f"[Step 2] 검색 실행: {' '.join(cmd)}")
     result = subprocess.run(cmd, cwd=str(PROJECT_ROOT), check=True)
@@ -222,11 +217,9 @@ JSON 형식으로만 응답:
 
 
 def _call_judge(prompt: str) -> dict:
-    model    = GenerativeModel(GEN_MODEL)
-    config   = GenerationConfig(temperature=0.0, response_mime_type="application/json")
-    response = model.generate_content(prompt, generation_config=config)
-    text     = re.sub(r"^```(?:json)?\s*", "", response.text.strip())
-    text     = re.sub(r"\s*```$", "", text)
+    raw  = _judge_client.generate(prompt, temperature=0.0)
+    text = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    text = re.sub(r"\s*```$", "", text)
     return json.loads(text)
 
 

@@ -16,8 +16,8 @@ BM25 통합 검색 파이프라인
   query는 쿼리 익스펜션 결과 bm25_keywords를 공백 제거 후 그대로 사용
   (형태소 재분리 시 복합명사 손실 문제 방지)
 
-[데이터 소스 변경]
-  CSV → DB (shared.db.connection.get_db_client 사용)
+[데이터 소스]
+  shared.db.connection.get_db_client 사용 (Cloud SQL)
 """
 import sys
 import argparse
@@ -28,26 +28,25 @@ from rank_bm25 import BM25Okapi
 from pathlib import Path
 
 # ─── 프로젝트 루트를 sys.path에 추가 ──────────────────────────────
-_BASE        = Path(__file__).resolve().parent
+_BASE         = Path(__file__).resolve().parent
 _PROJECT_ROOT = _BASE.parents[1]
 sys.path.insert(0, str(_PROJECT_ROOT))
+
+from sqlalchemy import text
+from shared.db.connection import get_db_client
 
 # ─── 경로 설정 ──────────────────────────────────────────────────────
 _DATA   = _BASE / "data"
 _OUTPUT = _BASE / "output"
-_CSV_LAW      = _PROJECT_ROOT / "data" / "raw" / "law_child_vertex.csv"
-_CSV_CASE_LAW = _PROJECT_ROOT / "data" / "raw" / "case_law_with_embeddings_vertex.csv"
 
 TOP_K_CASE = 20
 TOP_K_LAW  = 20
 POS_FILTER = {"NNG", "NNP", "VV", "VA", "XR"}
 
 # ─── DB 테이블 및 컬럼 상수 ─────────────────────────────────────────
-# 판례: case_law 테이블에서 필요한 컬럼만 SELECT
 CASE_TABLE = "case_law"
 CASE_COLS  = "case_id, case_name, case_number, judgment_date, court_name, issue, judgment_summary"
 
-# 법령: law_child 테이블에서 필요한 컬럼만 SELECT
 LAW_TABLE = "law_child"
 LAW_COLS  = "clause_key, law_name, article_no, paragraph_no, child_text"
 # ────────────────────────────────────────────────────────────────────
@@ -86,28 +85,32 @@ def parse_args() -> argparse.Namespace:
 
 
 # ── Kiwi 초기화 (corpus 토크나이징 전용) ────────────────────────────
+# 주의: Python 설치 경로에 한글이 포함된 경우(예: Windows 한글 사용자 계정) kiwipiepy가
+#       네이티브 크래시(힙 오염, 0xC0000374)를 일으키므로, ASCII 경로인지 먼저 확인한다.
 try:
-    import kiwipiepy_model
+    sys.prefix.encode("ascii")          # 한글 경로면 UnicodeEncodeError → 폴백
     from kiwipiepy import Kiwi
-    kiwi = Kiwi(model_path=str(Path(kiwipiepy_model.__file__).parent))
+    kiwi = Kiwi()
     _KIWI_OK = True
-except Exception as e:
-    print(f"[경고] Kiwi 초기화 실패: {e} → 공백 분리 토크나이저로 대체")
+except (UnicodeEncodeError, Exception) as e:
+    print(f"[경고] Kiwi 초기화 건너뜀: {type(e).__name__}: {e} → 공백 분리 토크나이저로 대체")
     kiwi = None
     _KIWI_OK = False
 
-def tokenize(text: str) -> list[str]:
+
+def tokenize(text_val: str) -> list[str]:
     """corpus(법령·판례 문서) 토크나이징 전용 — 형태소 분석 or 공백 분리"""
-    if not text or not text.strip():
+    if not text_val or not text_val.strip():
         return []
     if _KIWI_OK and kiwi is not None:
         tokens = [
             token.form
-            for token in kiwi.tokenize(text)
+            for token in kiwi.tokenize(text_val)
             if token.tag in POS_FILTER
         ]
-        return tokens if tokens else text.split()
-    return text.split()
+        return tokens if tokens else text_val.split()
+    return text_val.split()
+
 
 def build_query_tokens(keywords: list[str]) -> list[str]:
     """쿼리 토큰 생성: 형태소 분석 토큰 + raw 키워드(공백 제거) 보너스"""
@@ -118,21 +121,24 @@ def build_query_tokens(keywords: list[str]) -> list[str]:
     return list(dict.fromkeys(tokens))     # 순서 유지 중복 제거
 
 
-# ── 데이터 로드 (CSV) ────────────────────────────────────────────────
+# ── 데이터 로드 (DB) ─────────────────────────────────────────────────
 def load_case_law_from_db() -> pd.DataFrame:
     """
-    판례 데이터 로드 (CSV 파일).
+    판례 데이터 로드 (Cloud SQL).
     BM25 타겟 컬럼(bm25_target)은 issue + judgment_summary 결합으로 생성.
     """
     t0 = time.time()
-    print(f"▶ [판례] CSV 로드 중... ({_CSV_CASE_LAW.name})", end=" ", flush=True)
+    print(f"▶ [판례] DB 로드 중... ({CASE_TABLE})", end=" ", flush=True)
 
-    df = pd.read_csv(_CSV_CASE_LAW, encoding="utf-8-sig",
-                     usecols=lambda c: c in {
-                         "case_id", "case_name", "case_number",
-                         "judgment_date", "court_name", "issue", "judgment_summary"
-                     })
+    db = get_db_client()
+    rows = db.fetch_all(
+        text(f"SELECT {CASE_COLS} FROM {CASE_TABLE}")
+    )
 
+    if not rows:
+        raise ValueError(f"테이블 '{CASE_TABLE}'에서 데이터 없음")
+
+    df = pd.DataFrame(rows)
     df["bm25_target"] = (
         df["issue"].fillna("") + " " + df["judgment_summary"].fillna("")
     ).str.strip()
@@ -144,16 +150,20 @@ def load_case_law_from_db() -> pd.DataFrame:
 
 def load_law_child_from_db() -> pd.DataFrame:
     """
-    법령 데이터 로드 (CSV 파일).
+    법령 데이터 로드 (Cloud SQL).
     """
     t0 = time.time()
-    print(f"▶ [법령] CSV 로드 중... ({_CSV_LAW.name})", end=" ", flush=True)
+    print(f"▶ [법령] DB 로드 중... ({LAW_TABLE})", end=" ", flush=True)
 
-    df = pd.read_csv(_CSV_LAW, encoding="utf-8-sig",
-                     usecols=lambda c: c in {
-                         "clause_key", "law_name", "article_no",
-                         "paragraph_no", "child_text"
-                     })
+    db = get_db_client()
+    rows = db.fetch_all(
+        text(f"SELECT {LAW_COLS} FROM {LAW_TABLE}")
+    )
+
+    if not rows:
+        raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터 없음")
+
+    df = pd.DataFrame(rows)
     df["child_text"] = df["child_text"].fillna("").astype(str)
 
     print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
@@ -206,7 +216,6 @@ def save_json(data: list, out_dir: str, stem: str) -> None:
 def run_case_matching(args) -> None:
     print("\n" + "="*70)
 
-    # DB에서 로드
     df_valid = load_case_law_from_db()
 
     print("▶ [판례] corpus 토크나이징 중...")
@@ -269,7 +278,6 @@ def run_case_matching(args) -> None:
 def run_law_matching(args) -> None:
     print("\n" + "="*70)
 
-    # DB에서 로드
     df = load_law_child_from_db()
 
     print("▶ [법령] corpus 토크나이징 중... (약 1~2분 소요)")
