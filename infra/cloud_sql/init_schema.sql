@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS law_child (
     article_no TEXT NOT NULL,
     paragraph_no INTEGER,
     child_text TEXT NOT NULL,
+    parent_text TEXT,
     embed_vertex vector(3072),
     embed_kure vector(1024),
     embed_e5 vector(1024)
@@ -190,3 +191,17 @@ CREATE INDEX IF NOT EXISTS idx_answer_referenced_case_answer_id
 
 CREATE INDEX IF NOT EXISTS idx_answer_referenced_case_number
     ON answer_referenced_case (referenced_case_number);
+
+CREATE TABLE IF NOT EXISTS document_history (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    client_id TEXT NOT NULL,
+    doc_id TEXT NOT NULL UNIQUE,
+    file_name TEXT NOT NULL,
+    gcs_raw_path TEXT NOT NULL,
+    gcs_parsed_path TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_history_client_id
+    ON document_history (client_id);
+
