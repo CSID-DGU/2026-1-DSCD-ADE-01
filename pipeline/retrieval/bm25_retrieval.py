@@ -31,6 +31,7 @@ from kiwipiepy import Kiwi
 from pathlib import Path
 from sqlalchemy import text
 
+
 # ─── 프로젝트 루트를 sys.path에 추가 (shared 모듈 접근용) ──────────
 _BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BASE.parents[1]))  # 프로젝트 루트
@@ -121,13 +122,15 @@ def build_query_tokens(keywords: list[str]) -> list[str]:
 
 
 # ── DB 데이터 로드 ───────────────────────────────────────────────────
+import logging
+
 def load_case_law_from_db() -> pd.DataFrame:
     """
     DB의 case_law 테이블에서 판례 데이터 로드.
     BM25 타겟 컬럼(bm25_target)은 issue + judgment_summary 결합으로 생성.
     """
     t0 = time.time()
-    print(f"▶ [판례] DB 로드 중... (테이블: {CASE_TABLE})", end=" ", flush=True)
+    logging.info(f"▶ [판례] DB 로드 중... (테이블: {CASE_TABLE})")
 
     db   = get_db_client()
     rows = db.fetch_all(
@@ -146,7 +149,7 @@ def load_case_law_from_db() -> pd.DataFrame:
     # bm25_target이 비어있는 행 제거
     df_valid = df[df["bm25_target"].str.len() > 0].reset_index(drop=True)
 
-    print(f"완료 ({len(df_valid)}행 유효 / 전체 {len(df)}행, {time.time()-t0:.1f}초)")
+    logging.info(f"완료 ({len(df_valid)}행 유효 / 전체 {len(df)}행, {time.time()-t0:.1f}초)")
     return df_valid
 
 
@@ -155,7 +158,7 @@ def load_law_child_from_db() -> pd.DataFrame:
     DB의 law_child 테이블에서 법령 데이터 로드.
     """
     t0 = time.time()
-    print(f"▶ [법령] DB 로드 중... (테이블: {LAW_TABLE})", end=" ", flush=True)
+    logging.info(f"▶ [법령] DB 로드 중... (테이블: {LAW_TABLE})")
 
     db   = get_db_client()
     rows = db.fetch_all(
@@ -170,6 +173,7 @@ def load_law_child_from_db() -> pd.DataFrame:
         raise ValueError(f"테이블 '{LAW_TABLE}'에서 데이터를 가져오지 못했습니다.")
 
     df = pd.DataFrame(rows)
+
     df["child_text"] = df["child_text"].fillna("").astype(str)
     df["parent_text"] = df["parent_text"].fillna("").astype(str)
     if INCLUDE_CLAUSE_KEY_IN_LAW_BM25:
@@ -181,7 +185,7 @@ def load_law_child_from_db() -> pd.DataFrame:
     else:
         df["bm25_target"] = (df["parent_text"] + " " + df["child_text"]).str.strip()
 
-    print(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
+    logging.info(f"완료 ({len(df)}행, {time.time()-t0:.1f}초)")
     return df
 
 

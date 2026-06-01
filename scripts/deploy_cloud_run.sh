@@ -177,6 +177,7 @@ deploy_args=(
   --memory 4Gi
   --cpu 2
   --min-instances 1
+  --no-cpu-throttling
   --timeout 300
 )
 
