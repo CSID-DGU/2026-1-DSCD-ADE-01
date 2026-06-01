@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { v4 as uuidv4 } from "uuid";
 import { TopNavBar } from "@/components/TopNavBar";
 import type { NavTab } from "@/components/TopNavBar";
 import { UploadDropzone } from "@/components/UploadDropzone";
@@ -13,8 +14,21 @@ export default function UploadPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string>();
   const [activeTab, setActiveTab] = useState<NavTab>("analysis");
+  const [clientId, setClientId] = useState<string>("");
+
+  // 컴포넌트 마운트 시 client_id 초기화
+  useEffect(() => {
+    let storedId = localStorage.getItem("ade.client_id");
+    if (!storedId) {
+      storedId = uuidv4();
+      localStorage.setItem("ade.client_id", storedId);
+    }
+    setClientId(storedId);
+  }, []);
 
   async function handleFileSelect(file: File) {
+    if (!clientId) return;
+
     setFileName(file.name);
     setIsLoading(true);
     setError(undefined);
@@ -22,8 +36,10 @@ export default function UploadPage() {
     try {
       const form = new FormData();
       form.append("file", file);
+      form.append("client_id", clientId);
 
-      const res = await fetch(`${API_BASE}/v1/contracts/analyze/sync`, {
+      // 1. 새로운 파싱 전용 API 호출
+      const res = await fetch(`${API_BASE}/api/documents`, {
         method: "POST",
         body: form,
       });
@@ -34,9 +50,13 @@ export default function UploadPage() {
       }
 
       const data = await res.json();
-      sessionStorage.setItem("ade.analysis.result", JSON.stringify(data));
+      
+      // 2. 파싱된 계약서 정보와 메타데이터 저장
+      sessionStorage.setItem("ade.analysis.docId", data.doc_id);
+      sessionStorage.setItem("ade.analysis.contract", JSON.stringify(data.contract));
       sessionStorage.setItem("ade.analysis.fileName", file.name);
 
+      // 3. 분석 페이지로 이동
       window.location.href = "/analysis";
     } catch (e) {
       setError(e instanceof Error ? e.message : "알 수 없는 오류가 발생했습니다.");
