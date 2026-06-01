@@ -28,17 +28,16 @@ function LawCard({ item }: { item: LawItem }) {
       <div className="flex flex-row items-center gap-[10px]">
         <NumberBadge n={item.rank} />
         <p
-          className="text-sm font-medium"
-          style={{ color: "#1A1C1E", fontFamily: "var(--font-public-sans)", lineHeight: "22px" }}
+          className="text-sm font-semibold"
+          style={{ color: "#002045", fontFamily: "var(--font-public-sans)", lineHeight: "22px" }}
         >
           {item.name}
         </p>
       </div>
 
-      {/* Warning + detail */}
+      {/* Warning banner */}
       {item.warning && (
         <div className="flex flex-col gap-[5px] pl-9">
-          {/* Warning banner */}
           <div
             className="flex flex-row items-center gap-3 p-3 rounded-sm"
             style={{ background: "#FEE2E2", border: "1px solid #F65746" }}
@@ -55,21 +54,27 @@ function LawCard({ item }: { item: LawItem }) {
               {item.warning}
             </p>
           </div>
+        </div>
+      )}
 
-          {/* Detail with left border */}
-          {item.detail && (
-            <div
-              className="flex items-center px-[10px] py-0"
-              style={{ borderLeft: "2px solid #F65746", minHeight: "40px" }}
+      {/* Detail (Law Content) - Always Visible */}
+      {item.detail && (
+        <div className="pl-9">
+          <div
+            className="px-4 py-3 rounded-md"
+            style={{ 
+              background: "#F8FAFC", 
+              borderLeft: `4px solid ${item.warning ? "#F65746" : "#455F88"}`,
+              boxShadow: "inset 0 1px 2px rgba(0,0,0,0.02)"
+            }}
+          >
+            <p
+              className="text-sm whitespace-pre-wrap"
+              style={{ color: "#334155", fontFamily: "var(--font-public-sans)", lineHeight: "1.6" }}
             >
-              <p
-                className="text-sm"
-                style={{ color: "#1A1C1E", fontFamily: "var(--font-public-sans)", lineHeight: "20px" }}
-              >
-                {item.detail}
-              </p>
-            </div>
-          )}
+              {item.detail}
+            </p>
+          </div>
         </div>
       )}
     </div>
