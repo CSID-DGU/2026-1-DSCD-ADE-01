@@ -1,5 +1,7 @@
+"""API 요청/응답 스키마."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel
@@ -8,18 +10,128 @@ from pipeline.preprocessing.schema import LeaseContract
 from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
 
 
+# ──────────────────────────────────────────────────────────────────────
+# 공통
+# ──────────────────────────────────────────────────────────────────────
+
 class HealthResponse(BaseModel):
     status: str
 
 
-class SpecialTermExpansionResult(BaseModel):
+# ──────────────────────────────────────────────────────────────────────
+# 새로운 병렬 아키텍처용 스키마
+# ──────────────────────────────────────────────────────────────────────
+
+class DocumentHistoryItem(BaseModel):
+    doc_id: str
+    file_name: str
+    created_at: datetime
+    gcs_raw_path: str
+    gcs_parsed_path: str
+
+
+class DocumentHistoryResponse(BaseModel):
+    documents: list[DocumentHistoryItem]
+
+
+class DocumentUploadResponse(BaseModel):
+    doc_id: str
+    contract: LeaseContract
+
+
+class AnalyzeClauseRequest(BaseModel):
+    client_id: str
+    doc_id: str
+    clause_index: int
+    clause_text: str
+
+
+class ClauseAnalysisResponse(BaseModel):
     index: int
-    special_term: str
+    clause: str
+    expansion: ClauseQueryExpansion
+    top_results: list[RankedDocument]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 기존 (레거시)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class LayoutParseResponse(BaseModel):
+    contract: LeaseContract
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2단계: query_expansion  (layout_parse 결과 포함)
+# ──────────────────────────────────────────────────────────────────────
+
+class ClauseExpansion(BaseModel):
+    index: int
+    clause: str
     expansion: ClauseQueryExpansion
     retrieval_payload: dict[str, Any]
 
 
-class ContractAnalysisResponse(BaseModel):
+class QueryExpansionResponse(BaseModel):
     contract: LeaseContract
-    special_term_expansions: list[SpecialTermExpansionResult]
+    clauses: list[ClauseExpansion]
 
+
+# ──────────────────────────────────────────────────────────────────────
+# 3단계: retrieval  (query_expansion 결과 포함)
+# ──────────────────────────────────────────────────────────────────────
+
+class RetrievalHit(BaseModel):
+    doc_id: str
+    source_type: str          # "law" | "precedent"
+    rank: int
+    rrf_score: float | None = None
+    bm25_rank: int | None = None
+    dense_rank: int | None = None
+
+
+class ClauseRetrievalResult(BaseModel):
+    bm25: list[RetrievalHit]
+    dense: list[RetrievalHit]
+    rrf: list[RetrievalHit]
+
+
+class ClauseRetrieval(BaseModel):
+    index: int
+    clause: str
+    expansion: ClauseQueryExpansion
+    retrieval_payload: dict[str, Any]
+    retrieval_results: ClauseRetrievalResult
+
+
+class RetrievalResponse(BaseModel):
+    contract: LeaseContract
+    clauses: list[ClauseRetrieval]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4단계: reranking  (retrieval 결과 + 문서 내용 포함)
+# ──────────────────────────────────────────────────────────────────────
+
+class RankedDocument(BaseModel):
+    rank: int
+    doc_id: str
+    source_type: str          # "law" | "precedent"
+    rrf_score: float
+    bm25_rank: int | None = None
+    dense_rank: int | None = None
+    # 문서 내용 (DB에서 조회)
+    title: str                # 법령명+조항 or 사건명
+    content: str              # child_text or judgment_summary
+
+
+class ClauseRanking(BaseModel):
+    index: int
+    clause: str
+    top_results: list[RankedDocument]
+
+
+class RerankingResponse(BaseModel):
+    contract: LeaseContract
+    clauses: list[ClauseRanking]
