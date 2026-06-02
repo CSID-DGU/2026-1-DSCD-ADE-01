@@ -3,11 +3,13 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
 from pathlib import Path
+
 from dotenv import load_dotenv
+from pydantic import BaseModel, field_validator
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
-from pydantic import BaseModel
 
 load_dotenv()
 
@@ -22,8 +24,6 @@ MODEL_NAME = "gemini-2.5-pro"
 COMMON_TERMS_COUNT = 6
 
 # ── Pydantic 스키마 ──────────────────────────────────────────────
-from enum import Enum
-from pydantic import field_validator
 
 class LawType(str, Enum):
     law  = "법령"
