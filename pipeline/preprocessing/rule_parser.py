@@ -239,16 +239,41 @@ def _special_terms(text: str) -> list[str]:
         return []
 
     terms: list[str] = []
-    for raw_line in text[marker:].splitlines()[1:]:
+    lines_after_marker = text[marker:].splitlines()[1:]
+    
+    current_term_lines: list[str] = [] # 현재 처리 중인 특약의 여러 줄을 저장할 리스트
+
+    for raw_line in lines_after_marker:
         line = raw_line.strip()
-        if not line:
+
+        if not line: # 빈 라인은 무시
             continue
+
+        # 특약 섹션의 종료 조건
         if line.startswith("|") or line.startswith("[MASKED_"):
             break
         if any(word in line for word in ("주민등록번호", "전화", "이메일", "본 계약을 증명")):
             break
+
+        # 새로운 특약의 시작 ( '*' 또는 '-' 로 시작)
         if line.startswith(("*", "-")):
-            terms.append(line[1:].strip())
+            # 이전에 모아둔 특약이 있다면 리스트에 추가 (새로운 특약이 시작되었으므로)
+            if current_term_lines:
+                terms.append(" ".join(current_term_lines).strip())
+            
+            # 새로운 특약 시작
+            current_term_lines = [line[1:].strip()] # '*' 또는 '-' 기호 제거
+        else:
+            # '*' 또는 '-'로 시작하지 않는 줄은 이전 특약의 내용에 이어붙임
+            if current_term_lines: # 현재 처리 중인 특약이 있는 경우에만 이어붙임
+                current_term_lines.append(line)
+            # current_term_lines가 비어 있다면 (즉, '*'나 '-'로 시작하는 특약이 아직 없는데
+            # 내용만 있는 줄이 나타난다면) 이 줄은 무시됩니다. (사용자 요청에 부합)
+
+    # 루프 종료 후 마지막 특약을 리스트에 추가
+    if current_term_lines:
+        terms.append(" ".join(current_term_lines).strip())
+            
     return terms
 
 
