@@ -4,9 +4,12 @@ LLM-as-a-Judge: report_generator.py 출력 품질 평가
 - 체크리스트 평가:     Consistency (1-5, G-Eval) — 전체 체크리스트 단위
 
 사용법:
+    # 단일 파일
     python evaluation/judge_eval.py \
         --report output/test_rag_104_report.json \
         --output output/test_rag_104_judge.json
+    # 폴더 전체
+    python evaluation/judge_eval.py --report output/
 """
 
 import argparse
@@ -173,54 +176,79 @@ def evaluate_checklist(
     return (result or {}).get("consistency")
 
 
-# ── 메인 ─────────────────────────────────────────────────────────
-def main():
-    parser = argparse.ArgumentParser(description="LLM-as-a-Judge for report_generator output")
-    parser.add_argument("--report", required=True, help="*_report.json 파일 경로")
-    parser.add_argument("--output", required=True, help="judge 결과 저장 경로")
-    args = parser.parse_args()
+# ── 단일 파일 평가 ────────────────────────────────────────────────
+def run_single(report_path: Path, output_path: str) -> None:
+    print(f"\n[judge] 입력: {report_path.name}")
 
-    with open(args.report, "r", encoding="utf-8") as f:
+    with open(report_path, "r", encoding="utf-8") as f:
         report = json.load(f)
 
-    # target_terms를 report의 clause_results에서 직접 추출 (contract 파일 불필요)
     clause_results     = report.get("clause_results")     or []
     contract_checklist = report.get("contract_checklist") or []
     target_terms       = [cr.get("clause_text", "") for cr in clause_results]
 
-    print(f"대상 특약 수: {len(target_terms)}")
-    print(f"체크리스트 항목 수: {len(contract_checklist)}")
-    print(f"특약 분석 결과 수: {len(clause_results)}")
+    print(f"  대상 특약 수: {len(target_terms)}")
+    print(f"  체크리스트 항목 수: {len(contract_checklist)}")
 
-    # Coherence
-    print("\n[1] Coherence 평가 중...")
+    print("\n  [1] Coherence 평가 중...")
     pair_results, coherence_score = evaluate_relations(clause_results)
     if pair_results:
-        print(f"  쌍 수: {len(pair_results)}, 집계 점수: {coherence_score}")
+        print(f"    쌍 수: {len(pair_results)}, 집계 점수: {coherence_score}")
     else:
-        print("  평가 가능한 특약 쌍 없음")
+        print("    평가 가능한 특약 쌍 없음")
 
-    # Consistency
-    print("\n[2] Consistency 평가 중...")
+    print("\n  [2] Consistency 평가 중...")
     consistency_result = evaluate_checklist(target_terms, clause_results, contract_checklist)
     if consistency_result:
-        print(f"  consistency={consistency_result.get('score', '?')}")
+        print(f"    consistency={consistency_result.get('score', '?')}")
     else:
-        print("  체크리스트 없음 — 건너뜀")
+        print("    체크리스트 없음 — 건너뜀")
 
-    output = {
+    result = {
         "coherence_results":  pair_results,
         "coherence_score":    coherence_score,
         "consistency_result": consistency_result,
     }
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
 
-    print(f"\n=== 평가 완료 ===")
-    print(f"저장 경로: {output_path}")
-    print(f"Coherence: {coherence_score} | Consistency: {(consistency_result or {}).get('score')}")
+    print(f"\n  완료. 결과 저장: {out}")
+    print(f"  Coherence: {coherence_score} | Consistency: {(consistency_result or {}).get('score')}")
+
+
+# ── 메인 ─────────────────────────────────────────────────────────
+def main():
+    parser = argparse.ArgumentParser(description="LLM-as-a-Judge for report_generator output")
+    parser.add_argument(
+        "--report",
+        required=True,
+        help="*_report.json 파일 경로 또는 해당 파일들이 있는 폴더",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="출력 경로 또는 폴더. 미지정 시 report와 같은 폴더에 *_judge.json으로 저장",
+    )
+    args = parser.parse_args()
+
+    report_path = Path(args.report)
+
+    if report_path.is_dir():
+        files = sorted(report_path.glob("*_report.json"))
+        if not files:
+            print(f"[경고] {report_path} 에서 *_report.json 파일을 찾을 수 없습니다.")
+            return
+        print(f"[폴더 모드] {len(files)}개 파일 처리 시작")
+        for f in files:
+            judge_stem = f.stem.replace("_report", "_judge") if "_report" in f.stem else f"{f.stem}_judge"
+            out = str(Path(args.output) / f"{judge_stem}.json") if args.output else None
+            run_single(f, out or str(f.parent / f"{judge_stem}.json"))
+    else:
+        judge_stem = report_path.stem.replace("_report", "_judge") if "_report" in report_path.stem else f"{report_path.stem}_judge"
+        out = args.output or str(report_path.parent / f"{judge_stem}.json")
+        run_single(report_path, out)
 
 
 if __name__ == "__main__":
