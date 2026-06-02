@@ -12,7 +12,6 @@ evaluation/results/
 keyword_analysis_output/
 output/
 *.log
-*.txt
 
 # Python
 __pycache__/
