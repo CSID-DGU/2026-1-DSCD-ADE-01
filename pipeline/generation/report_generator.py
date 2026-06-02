@@ -435,19 +435,51 @@ def build_checklist_prompt(
 """
 
 
-def call_llm(prompt: str, schema: type[BaseModel] | None = None) -> dict | None:
+def call_llm(
+    prompt: str,
+    schema: type[BaseModel] | None = None,
+    max_retries: int = 2,
+) -> dict | None:
+    """LLM을 호출하고 JSON을 파싱·검증한 결과를 반환.
+
+    Args:
+        prompt: LLM에 전달할 프롬프트 문자열.
+        schema: Pydantic 모델 클래스. 지정 시 응답을 검증 후 반환.
+        max_retries: 일시적 오류(네트워크·파싱) 발생 시 재시도 횟수.
+
+    Returns:
+        파싱된 dict, 또는 최종 실패 시 None.
+    """
+    import time
+    from json import JSONDecodeError
+    from pydantic import ValidationError
+
     model = GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
     config = GenerationConfig(temperature=0.0, response_mime_type="application/json")
-    response = model.generate_content(prompt, generation_config=config)
-    text = response.text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    parsed = json.loads(text)
-    if schema:
-        # Pydantic 검증 - 스키마 불일치 시 ValidationError 발생
-        validated = schema.model_validate(parsed)
-        return validated.model_dump()
-    return parsed
+
+    for attempt in range(1, max_retries + 2):  # 1 + max_retries 번 시도
+        try:
+            response = model.generate_content(prompt, generation_config=config)
+            text = response.text.strip()
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            parsed = json.loads(text)
+            if schema:
+                validated = schema.model_validate(parsed)
+                return validated.model_dump()
+            return parsed
+        except JSONDecodeError as e:
+            print(f"  [call_llm] JSON 파싱 실패 (시도 {attempt}/{max_retries + 1}): {e}")
+        except ValidationError as e:
+            print(f"  [call_llm] Pydantic 검증 실패 (시도 {attempt}/{max_retries + 1}): {e}")
+        except Exception as e:
+            print(f"  [call_llm] LLM 호출 오류 (시도 {attempt}/{max_retries + 1}): {e}")
+
+        if attempt <= max_retries:
+            time.sleep(2 ** attempt)  # 지수 백오프: 2s, 4s
+
+    print("  [call_llm] 최대 재시도 횟수 초과 → None 반환")
+    return None
 
 def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
     """
