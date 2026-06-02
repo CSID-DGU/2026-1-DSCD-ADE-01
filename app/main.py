@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile, status, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
@@ -32,6 +32,8 @@ from app.schemas import (
     ClauseRanking,
     ClauseRetrieval,
     ClauseRetrievalResult,
+    DocumentHistoryItem,
+    DocumentHistoryResponse,
     DocumentUploadResponse,
     HealthResponse,
     LayoutParseResponse,
@@ -298,6 +300,8 @@ async def reranking(file: UploadFile = File(...)) -> RerankingResponse:
     clauses_ret = await _retrieve_all(clauses_exp)
     clauses_ranked = await _run_in_executor(_rerank_all, clauses_ret)
     return RerankingResponse(contract=contract, clauses=clauses_ranked)
+
+
 
 
 # ──────────────────────────────────────────────────────────────────────

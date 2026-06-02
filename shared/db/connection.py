@@ -52,7 +52,7 @@ class DBClient:
         self._db_user = db_user or settings.db_user
         self._db_password = db_password or settings.db_password
         self._db_name = db_name or settings.db_name
-        self._connector = Connector()
+        self._connector = Connector(refresh_strategy="lazy")
         self._engine: Engine = self._create_engine()
         self._closed = False
 
