@@ -485,6 +485,58 @@ def call_llm(
     print("  [call_llm] 최대 재시도 횟수 초과 → None 반환")
     return None
 
+
+def _pick_fallback_law(
+    clause_label: str,
+    target_clause: str,
+    laws: list[dict],
+    rag_map: dict[str, dict],
+) -> dict | None:
+    """LLM이 related_laws를 아무것도 선택하지 않았을 때,
+    검색된 법령 중 이 특약을 가장 잘 설명할 수 있는 법령 1개를 LLM이 선택.
+    laws 개수에 무관하게 동작.
+    """
+    if not laws:
+        return None
+
+    all_doc_ids = [m.get("doc_id", "") for m in laws if m.get("doc_id")]
+    output_format = json.dumps(
+        {"ref": "<위 목록의 doc_id 그대로>", "summary": "<일반인이 이해할 수 있는 설명>"},
+        ensure_ascii=False,
+        indent=2,
+    )
+
+    prompt = f"""
+[분석 대상 특약 ({clause_label})]
+{target_clause}
+
+[검색된 법령 목록]
+{format_laws(laws)}
+
+[출력 지시]
+위 특약을 가장 잘 설명할 수 있는 법령 1개를 골라 아래 JSON 형식으로만 응답하세요.
+ref는 반드시 대괄호 안의 식별자({', '.join(all_doc_ids)})를 변형 없이 그대로 사용하세요.
+summary는 법률 전문 지식이 없는 일반인도 이해할 수 있도록 작성하세요.
+  · 이 법령이 무슨 내용인지 쉬운 말로 설명하고,
+  · 왜 이 특약과 연관되는지 구체적으로 서술하세요.
+  · 전문 용어는 괄호 안에 풀어쓰세요. 예) "대항력(집을 팔아도 계속 살 수 있는 권리)"
+JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
+
+{output_format}
+"""
+    result = call_llm(prompt, schema=SelectedLaw)
+    if result:
+        ref = (result.get("ref") or "").strip()
+        if ref in rag_map:
+            return {**rag_map[ref], "summary": result.get("summary")}
+
+    # LLM 재시도도 실패하면 진짜 마지막 수단: RAG 1순위 법령
+    did = laws[0].get("doc_id", "")
+    if did and did in rag_map:
+        return {**rag_map[did], "summary": None}
+    return None
+
+
 def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
     """
     test_rag_one_contract.py 결과 JSON 하나를 입력받아 보고서 생성.
@@ -547,27 +599,22 @@ def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
                     })
                     covered.add(ref)
 
-            # LLM이 아무것도 선택하지 않았을 때만 RAG 1순위 법령 강제 삽입
+            # LLM이 아무것도 선택하지 않았을 때 → LLM이 직접 최적 법령 1개 선택
             # (판례만 선택한 경우는 LLM 판단 존중)
-            if not related_laws and item["laws"]:
-                did = item["laws"][0].get("doc_id", "")
-                if did and did in rag_map:
-                    related_laws.insert(0, {
-                        **rag_map[did],
-                        "summary": None,
-                    })
+            if not related_laws:
+                print(f"  [{clause_label}] selected_laws 빈 배열 → fallback LLM 호출")
+                fallback = _pick_fallback_law(clause_label, item["clause"], item["laws"], rag_map)
+                if fallback:
+                    related_laws.append(fallback)
 
             related_clauses = llm_out.get("related_clauses") or []
             print(f"  [{clause_label}] 완료 (법령 {sum(1 for r in related_laws if r['type']==LawType.law)}개, 판례 {sum(1 for r in related_laws if r['type']==LawType.case)}개)")
         else:
-            # LLM 완전 실패 시 RAG 1순위 법령만 fallback
-            related_laws = []
-            if item["laws"]:
-                did = item["laws"][0].get("doc_id", "")
-                if did and did in rag_map:
-                    related_laws.append({**rag_map[did], "summary": None})
+            # LLM 완전 실패 시 → fallback LLM으로 최적 법령 1개 선택
+            print(f"  [{clause_label}] LLM 실패 → fallback LLM 호출")
+            fallback = _pick_fallback_law(clause_label, item["clause"], item["laws"], rag_map)
+            related_laws = [fallback] if fallback else []
             related_clauses = []
-            print(f"  [{clause_label}] null 반환 → RAG fallback 적용")
 
         result = {
             "clause_id":      clause_label,
