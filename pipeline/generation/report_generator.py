@@ -550,19 +550,15 @@ def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
                     })
                     covered.add(ref)
 
-            # 법령이 하나도 없으면 RAG 1순위 법령을 맨 앞에 강제 삽입
-            has_law = any(r["type"] == LawType.law for r in related_laws)
-            if not has_law and item["laws"]:
-                fallback = item["laws"][0]
-                did = fallback.get("doc_id", "")
-                if did and did not in covered:
+            # LLM이 아무것도 선택하지 않았을 때만 RAG 1순위 법령 강제 삽입
+            # (판례만 선택한 경우는 LLM 판단 존중)
+            if not related_laws and item["laws"]:
+                did = item["laws"][0].get("doc_id", "")
+                if did and did in rag_map:
                     related_laws.insert(0, {
                         **rag_map[did],
                         "summary": None,
                     })
-                elif did and did in covered:
-                    # 이미 판례로 들어간 경우(있을 수 없지만 안전 처리) → 무시
-                    pass
 
             related_clauses = llm_out.get("related_clauses") or []
             print(f"  [{clause_label}] 완료 (법령 {sum(1 for r in related_laws if r['type']==LawType.law)}개, 판례 {sum(1 for r in related_laws if r['type']==LawType.case)}개)")
