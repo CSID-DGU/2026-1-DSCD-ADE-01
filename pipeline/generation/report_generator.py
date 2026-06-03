@@ -41,16 +41,18 @@ class RelatedClause(BaseModel):
     clause_text: str | None = None
     relation: str | None = None
 
-# LLM이 반환하는 중간 스키마 (summary + related_clauses만 생성)
-class LawSummary(BaseModel):
-    ref: str | None = None      # RAG doc_id 그대로
+# LLM이 반환하는 중간 스키마
+# - ref: RAG doc_id 그대로 (LLM이 생성하지 않음, 프롬프트에서 제시한 식별자 그대로 반환)
+# - summary: 일반인 눈높이 설명 (LLM 생성)
+class SelectedLaw(BaseModel):
+    ref: str | None = None
     summary: str | None = None
 
 class ClauseLLMOutput(BaseModel):
-    law_summaries: list[LawSummary] = []
+    selected_laws: list[SelectedLaw] = []   # 관련 있는 것만, 연관도 높은 순
     related_clauses: list[RelatedClause] = []
 
-    @field_validator("law_summaries", "related_clauses", mode="before")
+    @field_validator("selected_laws", "related_clauses", mode="before")
     @classmethod
     def coerce_list(cls, v):
         if v is None:
@@ -351,7 +353,7 @@ def build_clause_prompt(
     all_doc_ids = [m.get("doc_id", "") for m in laws + precs if m.get("doc_id")]
     output_format = json.dumps(
         {
-            "law_summaries": [{"ref": "<위 목록의 doc_id 그대로>", "summary": None}],
+            "selected_laws": [{"ref": "<위 목록의 doc_id 그대로>", "summary": "<일반인이 이해할 수 있는 설명>"}],
             "related_clauses": [{"clause_id": None, "clause_text": None, "relation": None}]
         },
         ensure_ascii=False,
@@ -380,8 +382,13 @@ def build_clause_prompt(
 [출력 지시]
 위 분석 대상 특약을 검토하여 아래 JSON 형식으로만 응답하세요.
 
-- law_summaries: [관련 법령]과 [관련 판례]의 모든 항목에 대해 이 특약에 어떻게 적용되는지 summary를 작성하세요.
+- selected_laws: [관련 법령]과 [관련 판례] 중 이 특약과 실제로 관련 있는 항목만 골라 연관도 높은 순서로 작성하세요.
+  반드시 법령(주택임대차보호법 조문 등)을 1개 이상 포함해야 합니다.
   ref는 반드시 대괄호 안의 식별자({', '.join(all_doc_ids)})를 변형 없이 그대로 사용하세요.
+  summary는 법률 전문 지식이 없는 일반인도 이해할 수 있도록 작성하세요.
+    · 이 법령/판례가 무슨 내용인지 쉬운 말로 설명하고,
+    · 왜 이 특약과 연관되는지 구체적으로 서술하세요.
+    · 전문 용어는 괄호 안에 풀어쓰세요. 예) "대항력(집을 팔아도 계속 살 수 있는 권리)"
   summary 외에 다른 필드는 생성하지 마세요.
 - related_clauses: [기타 특약 목록]과 [공통 특약] 중 이 특약과 동시에 적용될 때 확인이 필요한 것만 작성하세요. 없으면 빈 배열로 반환하세요.
 - JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
@@ -508,40 +515,66 @@ def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
             laws=item["laws"],
             precs=item["precs"],
         )
-        # RAG 결과로 related_laws 직접 구성 (LLM 개입 없음)
-        related_laws = []
+        # RAG 전체 목록을 doc_id → 항목으로 인덱싱 (type/ref/content는 RAG에서만)
+        rag_map: dict[str, dict] = {}
         for m in item["laws"]:
-            related_laws.append({
-                "type":    LawType.law,
-                "ref":     m.get("doc_id", ""),
-                "summary": None,
-                "content": m.get("content") or m.get("doc_text") or "",
-            })
+            did = m.get("doc_id", "")
+            if did:
+                rag_map[did] = {
+                    "type":    LawType.law,
+                    "ref":     did,
+                    "content": m.get("content") or m.get("doc_text") or "",
+                }
         for m in item["precs"]:
-            related_laws.append({
-                "type":    LawType.case,
-                "ref":     m.get("doc_id", ""),
-                "summary": None,
-                "content": m.get("content") or m.get("summary") or "",
-            })
+            did = m.get("doc_id", "")
+            if did:
+                rag_map[did] = {
+                    "type":    LawType.case,
+                    "ref":     did,
+                    "content": m.get("content") or m.get("summary") or "",
+                }
 
-        # LLM: summary + related_clauses만 생성
+        # LLM: 관련 항목 선택(연관도 순) + 일반인 눈높이 summary 생성
         llm_out = call_llm(prompt, schema=ClauseLLMOutput)
         if llm_out:
-            # doc_id → summary 매핑 후 related_laws에 주입
-            summary_map = {
-                ls["ref"]: ls["summary"]
-                for ls in (llm_out.get("law_summaries") or [])
-                if ls.get("ref") and ls.get("summary")
-            }
-            for law in related_laws:
-                if law["ref"] in summary_map:
-                    law["summary"] = summary_map[law["ref"]]
+            # LLM이 선택·정렬한 순서대로 related_laws 구성
+            # ref가 RAG에 존재하는 것만 포함 (환각 방지)
+            related_laws = []
+            covered: set[str] = set()
+            for sel in (llm_out.get("selected_laws") or []):
+                ref = (sel.get("ref") or "").strip()
+                if ref in rag_map and ref not in covered:
+                    related_laws.append({
+                        **rag_map[ref],
+                        "summary": sel.get("summary"),
+                    })
+                    covered.add(ref)
+
+            # 법령이 하나도 없으면 RAG 1순위 법령을 맨 앞에 강제 삽입
+            has_law = any(r["type"] == LawType.law for r in related_laws)
+            if not has_law and item["laws"]:
+                fallback = item["laws"][0]
+                did = fallback.get("doc_id", "")
+                if did and did not in covered:
+                    related_laws.insert(0, {
+                        **rag_map[did],
+                        "summary": None,
+                    })
+                elif did and did in covered:
+                    # 이미 판례로 들어간 경우(있을 수 없지만 안전 처리) → 무시
+                    pass
+
             related_clauses = llm_out.get("related_clauses") or []
-            print(f"  [{clause_label}] 완료")
+            print(f"  [{clause_label}] 완료 (법령 {sum(1 for r in related_laws if r['type']==LawType.law)}개, 판례 {sum(1 for r in related_laws if r['type']==LawType.case)}개)")
         else:
+            # LLM 완전 실패 시 RAG 1순위 법령만 fallback
+            related_laws = []
+            if item["laws"]:
+                did = item["laws"][0].get("doc_id", "")
+                if did and did in rag_map:
+                    related_laws.append({**rag_map[did], "summary": None})
             related_clauses = []
-            print(f"  [{clause_label}] null 반환 → related_clauses 빈 배열")
+            print(f"  [{clause_label}] null 반환 → RAG fallback 적용")
 
         result = {
             "clause_id":      clause_label,
