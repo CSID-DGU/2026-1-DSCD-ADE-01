@@ -1,11 +1,15 @@
+import argparse
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from enum import Enum
 from pathlib import Path
+
 from dotenv import load_dotenv
+from pydantic import BaseModel, field_validator
 import vertexai
 from vertexai.generative_models import GenerativeModel, GenerationConfig
-from pydantic import BaseModel
 
 load_dotenv()
 
@@ -20,28 +24,91 @@ MODEL_NAME = "gemini-2.5-pro"
 COMMON_TERMS_COUNT = 6
 
 # ── Pydantic 스키마 ──────────────────────────────────────────────
+
+class LawType(str, Enum):
+    law  = "법령"
+    case = "판례"
+
 class RelatedLaw(BaseModel):
-    type: str | None = None
-    ref: str | None = None
-    summary: str | None = None
+    """최종 출력 스키마 - RAG에서 구성, summary만 LLM 생성"""
+    type: LawType | None = None
+    ref: str | None = None       # RAG doc_id
+    summary: str | None = None   # LLM 생성
+    content: str | None = None   # RAG 원문
+
 class RelatedClause(BaseModel):
     clause_id: str | None = None
     clause_text: str | None = None
     relation: str | None = None
+
+# LLM이 반환하는 중간 스키마 (summary + related_clauses만 생성)
+class LawSummary(BaseModel):
+    ref: str | None = None      # RAG doc_id 그대로
+    summary: str | None = None
+
+class ClauseLLMOutput(BaseModel):
+    law_summaries: list[LawSummary] = []
+    related_clauses: list[RelatedClause] = []
+
+    @field_validator("law_summaries", "related_clauses", mode="before")
+    @classmethod
+    def coerce_list(cls, v):
+        if v is None:
+            return []
+        return v
+
+    @field_validator("related_clauses", mode="after")
+    @classmethod
+    def split_combined_clause_ids(cls, v):
+        """
+        1. LLM이 "공통특약 1, 2"처럼 여러 특약을 하나로 합친 경우 별도 항목으로 분리.
+           clause_text는 합쳐진 텍스트라 신뢰 불가 → None 처리.
+           relation은 그대로 이어받음.
+        2. 공통특약은 related_clauses에서 제외 (개별 특약 간 관계만 표시).
+        """
+        result = []
+        for item in v:
+            clause_id = item.clause_id or ""
+            ids = [x.strip() for x in clause_id.split(",") if x.strip()]
+            if len(ids) > 1:
+                for cid in ids:
+                    if not cid.startswith("공통특약"):
+                        result.append(RelatedClause(
+                            clause_id=cid,
+                            clause_text=None,
+                            relation=item.relation,
+                        ))
+            else:
+                if not clause_id.startswith("공통특약"):
+                    result.append(item)
+        return result
+
 class ClauseResult(BaseModel):
     clause_id: str | None = None
     clause_text: str | None = None
-    related_laws: list[RelatedLaw] | None = None
-    related_clauses: list[RelatedClause] | None = None  # 추가
+    related_laws: list[RelatedLaw] = []
+    related_clauses: list[RelatedClause] = []
+
 class ChecklistItem(BaseModel):
     item: str | None = None
     description: str | None = None
-    basis: list[str] | None = None
+    basis: list[str] = []
+
+    @field_validator("basis", mode="before")
+    @classmethod
+    def coerce_basis(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v
+
 class ReportOutput(BaseModel):
-    contract_checklist: list[ChecklistItem] | None = None
-    clause_results: list[ClauseResult] | None = None
+    contract_checklist: list[ChecklistItem] = []
+    clause_results: list[ClauseResult] = []
+
 class ChecklistOutput(BaseModel):
-    contract_checklist: list[ChecklistItem] | None = None
+    contract_checklist: list[ChecklistItem] = []
 
 # ── 프롬프트 ──────────────────────────────────────────
 SYSTEM_PROMPT = """[역할 및 지시]
@@ -200,25 +267,74 @@ def format_other_target_terms(target_terms: list, exclude_idx: int) -> str:
 
 
 def format_laws(matches: list) -> str:
+    """LLM 프롬프트용 - 대괄호 안에 doc_id를 노출해 LLM이 그대로 ref로 쓰도록 함"""
     lines = []
     for m in matches:
-        if not m.get("doc_text") and not m.get("summary"):
+        text = m.get("content") or m.get("doc_text") or m.get("summary") or ""
+        if not text:
             continue
-        ref = m.get("doc_id", "")
-        text = m.get("doc_text") or m.get("summary") or ""
-        lines.append(f"[{ref}]\n{text}")
+        doc_id = m.get("doc_id", "")
+        lines.append(f"[{doc_id}]\n{text}")
     return "\n\n".join(lines) if lines else "해당 없음"
 
 
 def format_precs(matches: list) -> str:
+    """LLM 프롬프트용 - 대괄호 안에 doc_id를 노출해 LLM이 그대로 ref로 쓰도록 함"""
     lines = []
     for m in matches:
-        summary = m.get("summary", "")
-        if not summary or summary == "nan":
+        text = m.get("content") or m.get("summary") or ""
+        if not text or text == "nan":
             continue
         doc_id = m.get("doc_id", "")
-        lines.append(f"[판례 {doc_id}]\n{summary}")
+        lines.append(f"[{doc_id}]\n{text}")
     return "\n\n".join(lines) if lines else "해당 없음"
+
+
+def dedup_related_clauses(clause_results: list[dict]) -> list[dict]:
+    """
+    A→B, B→A 중복 제거. 먼저 등장한 쌍만 유지.
+    """
+    seen: set[frozenset] = set()
+    for cr in clause_results:
+        cid = cr.get("clause_id", "")
+        deduped = []
+        for rel in cr.get("related_clauses") or []:
+            other_id = rel.get("clause_id", "")
+            pair: frozenset = frozenset([cid, other_id])
+            if pair not in seen:
+                seen.add(pair)
+                deduped.append(rel)
+        cr["related_clauses"] = deduped
+    return clause_results
+
+
+def load_from_rag_result(rag_path: str) -> tuple[dict, list, list, dict]:
+    """
+    test_rag_one_contract.py 결과 JSON을 읽어
+    (property_info, common_terms, clauses_with_hits, {}) 반환.
+
+    clauses_with_hits 각 항목:
+        {
+            "index":   int,          # 절대 인덱스 (COMMON_TERMS_COUNT+1 ~)
+            "clause":  str,          # 특약 원문
+            "laws":    list[dict],   # source_type == "law" 인 top_results
+            "precs":   list[dict],   # source_type == "precedent" 인 top_results
+        }
+    """
+    data = load_json(rag_path)
+    property_info = data.get("property_info", {})
+    common_terms  = data.get("common_terms", [])
+    clauses_with_hits = []
+    for item in data.get("clauses", []):
+        laws  = [r for r in item.get("top_results", []) if r.get("source_type") == "law"]
+        precs = [r for r in item.get("top_results", []) if r.get("source_type") == "precedent"]
+        clauses_with_hits.append({
+            "index":  item["index"],
+            "clause": item["clause"],
+            "laws":   laws,
+            "precs":  precs,
+        })
+    return property_info, common_terms, clauses_with_hits
 
 
 def build_clause_prompt(
@@ -231,11 +347,11 @@ def build_clause_prompt(
     laws: list,
     precs: list,
 ) -> str:
+    # 프롬프트에 노출할 doc_id 목록 (LLM이 ref로 그대로 사용)
+    all_doc_ids = [m.get("doc_id", "") for m in laws + precs if m.get("doc_id")]
     output_format = json.dumps(
         {
-            "clause_id": clause_label,
-            "clause_text": None,
-            "related_laws": [{"type": None, "ref": None, "summary": None}],
+            "law_summaries": [{"ref": "<위 목록의 doc_id 그대로>", "summary": None}],
             "related_clauses": [{"clause_id": None, "clause_text": None, "relation": None}]
         },
         ensure_ascii=False,
@@ -263,9 +379,11 @@ def build_clause_prompt(
 
 [출력 지시]
 위 분석 대상 특약을 검토하여 아래 JSON 형식으로만 응답하세요.
-- related_clauses는 다른 특약과 동시에 적용될 때 확인이 필요한 사항이 실제로 존재하는 경우에만 작성하고, 없으면 빈 배열로 반환하세요.
-- clause_id는 입력된 특약의 ID를 그대로 사용하세요.
-- 모든 필드는 해당 내용이 없으면 null을 반환하세요.
+
+- law_summaries: [관련 법령]과 [관련 판례]의 모든 항목에 대해 이 특약에 어떻게 적용되는지 summary를 작성하세요.
+  ref는 반드시 대괄호 안의 식별자({', '.join(all_doc_ids)})를 변형 없이 그대로 사용하세요.
+  summary 외에 다른 필드는 생성하지 마세요.
+- related_clauses: [기타 특약 목록]과 [공통 특약] 중 이 특약과 동시에 적용될 때 확인이 필요한 것만 작성하세요. 없으면 빈 배열로 반환하세요.
 - JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
 {output_format}
@@ -317,29 +435,168 @@ def build_checklist_prompt(
 """
 
 
-def call_llm(prompt: str, schema: type[BaseModel] | None = None) -> dict | None:
+def call_llm(
+    prompt: str,
+    schema: type[BaseModel] | None = None,
+    max_retries: int = 2,
+) -> dict | None:
+    """LLM을 호출하고 JSON을 파싱·검증한 결과를 반환.
+
+    Args:
+        prompt: LLM에 전달할 프롬프트 문자열.
+        schema: Pydantic 모델 클래스. 지정 시 응답을 검증 후 반환.
+        max_retries: 일시적 오류(네트워크·파싱) 발생 시 재시도 횟수.
+
+    Returns:
+        파싱된 dict, 또는 최종 실패 시 None.
+    """
+    import time
+    from json import JSONDecodeError
+    from pydantic import ValidationError
+
     model = GenerativeModel(MODEL_NAME, system_instruction=SYSTEM_PROMPT)
     config = GenerationConfig(temperature=0.0, response_mime_type="application/json")
-    response = model.generate_content(prompt, generation_config=config)
-    text = response.text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text)
-    text = re.sub(r"\s*```$", "", text)
-    parsed = json.loads(text)
-    if schema:
-        # Pydantic 검증 - 스키마 불일치 시 ValidationError 발생
-        validated = schema.model_validate(parsed)
-        return validated.model_dump()
-    return parsed
 
-def main():
-    # ── 파일 로드 ──────────────────────────────────────────────────
+    for attempt in range(1, max_retries + 2):  # 1 + max_retries 번 시도
+        try:
+            response = model.generate_content(prompt, generation_config=config)
+            text = response.text.strip()
+            text = re.sub(r"^```(?:json)?\s*", "", text)
+            text = re.sub(r"\s*```$", "", text)
+            parsed = json.loads(text)
+            if schema:
+                validated = schema.model_validate(parsed)
+                return validated.model_dump()
+            return parsed
+        except JSONDecodeError as e:
+            print(f"  [call_llm] JSON 파싱 실패 (시도 {attempt}/{max_retries + 1}): {e}")
+        except ValidationError as e:
+            print(f"  [call_llm] Pydantic 검증 실패 (시도 {attempt}/{max_retries + 1}): {e}")
+        except Exception as e:
+            print(f"  [call_llm] LLM 호출 오류 (시도 {attempt}/{max_retries + 1}): {e}")
+
+        if attempt <= max_retries:
+            time.sleep(2 ** attempt)  # 지수 백오프: 2s, 4s
+
+    print("  [call_llm] 최대 재시도 횟수 초과 → None 반환")
+    return None
+
+def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
+    """
+    test_rag_one_contract.py 결과 JSON 하나를 입력받아 보고서 생성.
+
+    사용법:
+        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json
+        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json --output path/to/report.json
+    """
+    print(f"[rag-result 모드] 입력: {rag_path}")
+    property_info, common_terms, clauses_with_hits = load_from_rag_result(rag_path)
+
+    # 다른 특약 원문 리스트 (관계 분석용)
+    all_target_terms = [c["clause"] for c in clauses_with_hits]
+
+    def _call_one(i: int, item: dict) -> tuple[int, dict | None]:
+        clause_label = f"특약{item['index'] - COMMON_TERMS_COUNT}"
+        print(f"  [{clause_label}] LLM 호출 중...")
+        prompt = build_clause_prompt(
+            target_clause=item["clause"],
+            clause_label=clause_label,
+            property_info=property_info,
+            common_terms=common_terms,
+            other_target_terms=all_target_terms,
+            exclude_idx=i,
+            laws=item["laws"],
+            precs=item["precs"],
+        )
+        # RAG 결과로 related_laws 직접 구성 (LLM 개입 없음)
+        related_laws = []
+        for m in item["laws"]:
+            related_laws.append({
+                "type":    LawType.law,
+                "ref":     m.get("doc_id", ""),
+                "summary": None,
+                "content": m.get("content") or m.get("doc_text") or "",
+            })
+        for m in item["precs"]:
+            related_laws.append({
+                "type":    LawType.case,
+                "ref":     m.get("doc_id", ""),
+                "summary": None,
+                "content": m.get("content") or m.get("summary") or "",
+            })
+
+        # LLM: summary + related_clauses만 생성
+        llm_out = call_llm(prompt, schema=ClauseLLMOutput)
+        if llm_out:
+            # doc_id → summary 매핑 후 related_laws에 주입
+            summary_map = {
+                ls["ref"]: ls["summary"]
+                for ls in (llm_out.get("law_summaries") or [])
+                if ls.get("ref") and ls.get("summary")
+            }
+            for law in related_laws:
+                if law["ref"] in summary_map:
+                    law["summary"] = summary_map[law["ref"]]
+            related_clauses = llm_out.get("related_clauses") or []
+            print(f"  [{clause_label}] 완료")
+        else:
+            related_clauses = []
+            print(f"  [{clause_label}] null 반환 → related_clauses 빈 배열")
+
+        result = {
+            "clause_id":      clause_label,
+            "clause_text":    item["clause"],
+            "related_laws":   related_laws,
+            "related_clauses": related_clauses,
+        }
+        return i, result
+
+    # 특약별 LLM 호출 병렬 실행 후 원래 순서로 정렬
+    clause_results_map: dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=len(clauses_with_hits)) as executor:
+        futures = {executor.submit(_call_one, i, item): i
+                   for i, item in enumerate(clauses_with_hits)}
+        for future in as_completed(futures):
+            i, result = future.result()
+            if result:
+                clause_results_map[i] = result
+
+    clause_results = [clause_results_map[i]
+                      for i in sorted(clause_results_map)]
+
+    # A→B / B→A 중복 관계 제거
+    clause_results = dedup_related_clauses(clause_results)
+
+    # ── 체크리스트 생성 ────────────────────────────────────────────
+    print("  [전체 체크리스트] LLM 호출 중...")
+    checklist_result = call_llm(
+        build_checklist_prompt(all_target_terms, clause_results, property_info, common_terms),
+        schema=ChecklistOutput,
+    )
+    contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
+    print("  [전체 체크리스트] 완료")
+
+    # ── 저장 ──────────────────────────────────────────────────────
+    final_output = ReportOutput(
+        contract_checklist=contract_checklist,
+        clause_results=clause_results,
+    )
+    if not output_path:
+        stem = Path(rag_path).stem  # e.g. "test_rag_104"
+        output_path = str(Path(rag_path).parent / f"{stem}_report.json")
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(final_output.model_dump_json(indent=2, exclude_none=False))
+    print(f"  완료. 결과 저장: {output_path}")
+
+
+def run_legacy() -> None:
+    """기존 reranking 파일 기반 처리 (하위 호환)."""
     base_dir = Path(__file__).resolve().parent
     project_root = base_dir.parent.parent
     reranking_dir = project_root / "output" / "reranking"
 
-    # prefix 기준으로 law/caselaw 파일 페어링
     law_files = list(reranking_dir.glob("*_reranking_law.json"))
-
     for law_file in law_files:
         prefix = law_file.name.replace("_reranking_law.json", "")
         caselaw_file = reranking_dir / f"{prefix}_reranking_caselaw.json"
@@ -357,22 +614,18 @@ def main():
         law_results = load_json(law_file)
         prec_results = load_json(caselaw_file)
 
-        # ── 데이터 분리 ────────────────────────────────────────────────
         property_info = contract["property_info"]
         special_terms = contract["special_terms"]
-        common_terms = special_terms[:COMMON_TERMS_COUNT]
-        target_terms = special_terms[COMMON_TERMS_COUNT:]
+        common_terms  = special_terms[:COMMON_TERMS_COUNT]
+        target_terms  = special_terms[COMMON_TERMS_COUNT:]
 
-        # ── rrf 결과 인덱싱 ────────────────────────────────────────────
         rrf_index = build_rrf_index(law_results, prec_results)
-
-        # ── 타겟 특약별 LLM 호출 ───────────────────────────────────────
         clause_results = []
 
         for i, term in enumerate(target_terms):
             rrf_idx = i + 1
             clause_label = f"특약{i+1}"
-            laws = rrf_index.get(rrf_idx, {}).get("laws", [])
+            laws  = rrf_index.get(rrf_idx, {}).get("laws", [])
             precs = rrf_index.get(rrf_idx, {}).get("precs", [])
 
             print(f"  [{clause_label}] LLM 호출 중...")
@@ -393,7 +646,6 @@ def main():
             else:
                 print(f"  [{clause_label}] 실패 - null 반환")
 
-        # ── 전체 계약서 체크리스트 생성 ───────────────────────────────
         print(f"  [전체 체크리스트] LLM 호출 중...")
         checklist_result = call_llm(
             build_checklist_prompt(target_terms, clause_results, property_info, common_terms),
@@ -402,7 +654,6 @@ def main():
         contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
         print(f"  [전체 체크리스트] 완료")
 
-        # ── 최종 출력 ──────────────────────────────────────────────────
         final_output = ReportOutput(
             contract_checklist=contract_checklist,
             clause_results=clause_results,
@@ -410,8 +661,46 @@ def main():
         output_path = project_root / "output" / f"{prefix}_report.json"
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(final_output.model_dump_json(indent=2, exclude_none=False))
-
         print(f"  [{prefix}] 완료. 결과 저장: {output_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="report_generator")
+    parser.add_argument(
+        "--rag-result",
+        type=str,
+        default=None,
+        help="test_rag_*.json 파일 경로 또는 해당 파일들이 들어있는 폴더 경로.",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="출력 JSON 경로 또는 폴더. 파일 지정 시 단일 파일, 폴더 지정 시 해당 폴더에 저장. 미지정 시 입력 파일과 같은 폴더.",
+    )
+    args = parser.parse_args()
+
+    if args.rag_result:
+        rag_path = Path(args.rag_result)
+
+        # 폴더 지정 시 → test_rag_*.json 전부 처리
+        if rag_path.is_dir():
+            files = sorted(rag_path.glob("test_rag_*.json"))
+            if not files:
+                print(f"[경고] {rag_path} 에서 test_rag_*.json 파일을 찾을 수 없습니다.")
+                return
+            print(f"[폴더 모드] {len(files)}개 파일 처리 시작")
+            for f in files:
+                out = None
+                if args.output:
+                    out = str(Path(args.output) / f"{f.stem}_report.json")
+                run_from_rag_result(str(f), out)
+        # 파일 지정 시 → 해당 파일만 처리
+        else:
+            run_from_rag_result(str(rag_path), args.output)
+    else:
+        run_legacy()
+
 
 if __name__ == "__main__":
     main()
