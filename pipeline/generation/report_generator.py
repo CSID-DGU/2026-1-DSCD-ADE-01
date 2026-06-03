@@ -311,7 +311,7 @@ def load_from_rag_result(rag_path: str) -> tuple[dict, list, list]:
     """
     RAG 결과 JSON을 읽어 (property_info, common_terms, clauses_with_hits) 반환.
 
-    신규 포맷: clauses[].law_results / clauses[].precedent_results 분리
+    신규 포맷: clauses[].law_results / clauses[].prec_results 분리
     구버전 포맷: clauses[].top_results (source_type 필드로 구분) — 하위 호환 유지
 
     clauses_with_hits 각 항목:
@@ -327,10 +327,10 @@ def load_from_rag_result(rag_path: str) -> tuple[dict, list, list]:
     common_terms  = data.get("common_terms", [])
     clauses_with_hits = []
     for item in data.get("clauses", []):
-        # 신규 포맷: law_results / precedent_results
-        if "law_results" in item or "precedent_results" in item:
+        # 신규 포맷: law_results / prec_results
+        if "law_results" in item or "prec_results" in item:
             laws  = item.get("law_results", [])
-            precs = item.get("precedent_results", [])
+            precs = item.get("prec_results", [])
         # 구버전 포맷: top_results + source_type 필터
         else:
             laws  = [r for r in item.get("top_results", []) if r.get("source_type") == "law"]
