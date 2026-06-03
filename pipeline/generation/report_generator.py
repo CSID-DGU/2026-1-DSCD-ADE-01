@@ -388,6 +388,9 @@ def build_clause_prompt(
     · 전문 용어는 괄호 안에 풀어쓰세요. 예) "대항력(집을 팔아도 계속 살 수 있는 권리)"
   summary 외에 다른 필드는 생성하지 마세요.
 - related_clauses: [기타 특약 목록]과 [공통 특약] 중 이 특약과 동시에 적용될 때 확인이 필요한 것만 작성하세요. 없으면 빈 배열로 반환하세요.
+  clause_id는 반드시 위 목록에서 보여준 ID를 그대로 사용하세요. (예: "특약1", "특약3", "공통특약 1")
+  "기타 특약", "개별 특약" 등 다른 표현은 절대 사용하지 마세요. null도 허용하지 않습니다.
+  clause_text는 null로 두세요. (자동으로 채워집니다)
 - JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
 {output_format}
@@ -433,6 +436,8 @@ def build_checklist_prompt(
 위 계약서 전체를 바탕으로 임차인이 계약 전 확인해야 할 통합 체크리스트를 작성하세요.
 - 입력된 모든 특약을 종합 검토한 후, 확인 항목을 통합하여 작성하고 확인 항목이 없는 경우 빈 배열로 반환하세요.
 - 각 특약을 개별적으로 나열하는 것이 아니라, 계약서 전체 맥락에서 중요한 확인 사항을 도출하세요.
+- basis: 이 체크리스트 항목의 근거가 되는 특약 ID만 나열하세요. (예: ["특약1", "공통특약 2"])
+  법령명, 판례명은 basis에 포함하지 마세요.
 아래 JSON 형식으로만 응답하세요. JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
 {output_format}
@@ -636,6 +641,25 @@ def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
 
     clause_results = [clause_results_map[i]
                       for i in sorted(clause_results_map)]
+
+    # clause_id → clause_text 매핑 테이블 구성 (LLM 환각 방지용 post-processing)
+    # 타겟 특약: "특약1" ~ "특약N"
+    # 공통 특약: "공통특약 1" ~ "공통특약 N"
+    clause_text_map: dict[str, str] = {}
+    for i, item in enumerate(clauses_with_hits):
+        label = f"특약{item['index'] - COMMON_TERMS_COUNT}"
+        clause_text_map[label] = item["clause"]
+    for i, term in enumerate(common_terms):
+        clause_text_map[f"공통특약 {i + 1}"] = term
+
+    # related_clauses의 clause_text를 매핑 테이블 기준으로 채움
+    for cr in clause_results:
+        for rel in cr.get("related_clauses") or []:
+            cid = rel.get("clause_id") or ""
+            if cid in clause_text_map:
+                rel["clause_text"] = clause_text_map[cid]
+            else:
+                rel["clause_text"] = None  # 매핑 실패 시 null 유지
 
     # A→B / B→A 중복 관계 제거
     clause_results = dedup_related_clauses(clause_results)
