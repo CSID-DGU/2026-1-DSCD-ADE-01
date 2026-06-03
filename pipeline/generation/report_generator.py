@@ -63,10 +63,9 @@ class ClauseLLMOutput(BaseModel):
     @classmethod
     def split_combined_clause_ids(cls, v):
         """
-        1. LLM이 "공통특약 1, 2"처럼 여러 특약을 하나로 합친 경우 별도 항목으로 분리.
-           clause_text는 합쳐진 텍스트라 신뢰 불가 → None 처리.
-           relation은 그대로 이어받음.
-        2. 공통특약은 related_clauses에서 제외 (개별 특약 간 관계만 표시).
+        LLM이 "공통특약 1, 2" 또는 "특약1, 특약2"처럼 여러 특약을 하나로 합친 경우
+        별도 항목으로 분리. clause_text는 합쳐진 텍스트라 신뢰 불가 → None 처리.
+        relation은 그대로 이어받음.
         """
         result = []
         for item in v:
@@ -74,15 +73,13 @@ class ClauseLLMOutput(BaseModel):
             ids = [x.strip() for x in clause_id.split(",") if x.strip()]
             if len(ids) > 1:
                 for cid in ids:
-                    if not cid.startswith("공통특약"):
-                        result.append(RelatedClause(
-                            clause_id=cid,
-                            clause_text=None,
-                            relation=item.relation,
-                        ))
+                    result.append(RelatedClause(
+                        clause_id=cid,
+                        clause_text=None,
+                        relation=item.relation,
+                    ))
             else:
-                if not clause_id.startswith("공통특약"):
-                    result.append(item)
+                result.append(item)
         return result
 
 class ClauseResult(BaseModel):
@@ -383,7 +380,7 @@ def build_clause_prompt(
 위 분석 대상 특약을 검토하여 아래 JSON 형식으로만 응답하세요.
 
 - selected_laws: [관련 법령]과 [관련 판례] 중 이 특약과 실제로 관련 있는 항목만 골라 연관도 높은 순서로 작성하세요.
-  반드시 법령(주택임대차보호법 조문 등)을 1개 이상 포함해야 합니다.
+  관련 있는 항목이 없으면 빈 배열로 반환하세요.
   ref는 반드시 대괄호 안의 식별자({', '.join(all_doc_ids)})를 변형 없이 그대로 사용하세요.
   summary는 법률 전문 지식이 없는 일반인도 이해할 수 있도록 작성하세요.
     · 이 법령/판례가 무슨 내용인지 쉬운 말로 설명하고,
