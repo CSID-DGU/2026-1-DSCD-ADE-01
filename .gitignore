@@ -42,3 +42,4 @@ tests/pipeline/query_expansion_v1/
 # test
 tests/
 /scripts/db_peek.py
+/scripts/batch_rag_contracts.py
