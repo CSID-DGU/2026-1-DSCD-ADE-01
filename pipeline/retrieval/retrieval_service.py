@@ -3,13 +3,17 @@
 Dense 유사도 검색은 in-memory numpy 대신 PostgreSQL pgvector (<=> 코사인 거리)에 위임한다.
 → load() 시 임베딩 벡터를 메모리에 올리지 않아 RAM 사용량이 대폭 줄어든다.
 
+리랭킹 방식: alpha_hybrid
+  - 법령:  α=0.20 → BM25 20% + Dense 80%  (Dense 위주 — 의미 기반)
+  - 판례:  α=0.70 → BM25 70% + Dense 30%  (BM25 위주 — 키워드 기반)
+  - 법령/판례 각각 독립 랭킹 후 합산 → 두 도메인 결과 보장
+
+alpha 값은 alpha_sweep 평가 최적값 (alpha_sweep_2d_20260530_235115) 사용.
+
 의존 관계:
   BM25  : pipeline.retrieval.bm25_retrieval (tokenize, build_query_tokens, load_*_from_db)
   Embed : pipeline.retrieval.dense_retrieval (embed_query — Vertex AI 호출)
   DB    : shared.db.connection (pgvector 쿼리)
-
-무거운 import (Kiwi NLP 모델, Vertex AI init 등)는 load() / retrieve() 내부에서
-지연 임포트하여 uvicorn 포트 바인딩 전에 실행되지 않도록 한다.
 """
 from __future__ import annotations
 
@@ -17,11 +21,12 @@ import logging
 
 log = logging.getLogger(__name__)
 
-TOP_K = 20
-RRF_K = 60
+TOP_K      = 20   # 법령/판례 각각 상위 K개 → 총 최대 2*TOP_K 반환
+ALPHA_LAW  = 0.20  # 법령: BM25 20% + Dense 80%
+ALPHA_PREC = 0.70  # 판례: BM25 70% + Dense 30%
+
 # pgvector <=> 는 (1 - cosine_similarity) 를 반환한다.
-# MIN_COSINE_SIMILARITY = 0.2 이면 최대 허용 distance = 0.8
-_MIN_SIM = 0.2
+_MIN_SIM  = 0.2
 _MAX_DIST = round(1.0 - _MIN_SIM, 6)  # 0.8
 
 
@@ -35,7 +40,6 @@ class RetrievalService:
 
     @property
     def is_ready(self) -> bool:
-        """코퍼스 로드 완료 여부."""
         return self._corpus is not None
 
     @property
@@ -63,7 +67,7 @@ class RetrievalService:
 
         log.info("▶ BM25 코퍼스 로드 시작...")
 
-        law_df = load_law_child_from_db()
+        law_df  = load_law_child_from_db()
         prec_df = load_case_law_from_db()
 
         law_docs = [
@@ -80,49 +84,122 @@ class RetrievalService:
             len(law_docs),
             len(prec_docs),
         )
-        law_bm25 = BM25Okapi([tokenize(d["text"]) for d in law_docs])
+        law_bm25  = BM25Okapi([tokenize(d["text"]) for d in law_docs])
         prec_bm25 = BM25Okapi([tokenize(d["text"]) for d in prec_docs])
 
         self._corpus = {
-            "law_docs": law_docs,
-            "law_bm25": law_bm25,
+            "law_docs":  law_docs,
+            "law_bm25":  law_bm25,
             "prec_docs": prec_docs,
             "prec_bm25": prec_bm25,
         }
         log.info("▶ BM25 코퍼스 로드 완료 (Dense 검색은 쿼리 시 pgvector에 위임)")
 
     # ------------------------------------------------------------------ #
-    # Dense 검색 (pgvector)                                               #
+    # 하이브리드 검색 (BM25 + Dense → Alpha Hybrid)                       #
     # ------------------------------------------------------------------ #
 
-    def _pgvector_search(
-        self,
-        query_vec,  # np.ndarray
-        top_k: int,
-    ) -> dict[str, tuple[int, str]]:
-        """pgvector <=> (코사인 거리)로 법령·판례를 각각 검색한다.
+    def retrieve(self, payload: dict) -> dict:
+        """BM25 → Dense(pgvector) → Alpha Hybrid 실행.
 
-        반환값: {doc_id: (rank, source_type)}
-          - doc_id  : clause_key(법령) 또는 case_number(판례) 문자열
-          - rank    : 1-based 순위 (거리 오름차순)
-          - source_type: "law" | "precedent"
+        Parameters
+        ----------
+        payload:
+            build_retrieval_payload() 결과.
+            필수 키: "bm25_keywords" (list[str]), "dense_query" (str)
 
-        vec_literal은 numpy float 값만으로 구성된 문자열이므로 SQL 인젝션 위험 없음.
-        pg8000 드라이버는 pgvector 타입 어댑터를 지원하지 않아 문자열 리터럴로 캐스팅한다.
+        Returns
+        -------
+        dict with keys:
+            "bm25" : BM25 순위 목록
+            "dense": Dense 순위 목록
+            "law"  : Alpha Hybrid 법령 순위 목록 (rank 1~TOP_K, 독립)
+            "prec" : Alpha Hybrid 판례 순위 목록 (rank 1~TOP_K, 독립)
+
+        법령/판례는 평가(legal_retrieval_eval_multi)와 동일하게 각각 독립 랭킹한다.
+        슬롯 경쟁 없이 두 도메인 모두 top-K를 보장한다.
         """
-        from sqlalchemy import text
+        from pipeline.retrieval.bm25_retrieval import build_query_tokens
+        from pipeline.retrieval.dense_retrieval import embed_query
 
+        corpus = self.corpus
+
+        # ── BM25 (법령/판례 각각, raw score 포함) ─────────────────────
+        query_tokens = build_query_tokens(payload["bm25_keywords"])
+
+        bm25_law_scores  = self._bm25_scores(query_tokens, corpus["law_bm25"],  corpus["law_docs"],  "law",       "clause_key")
+        bm25_prec_scores = self._bm25_scores(query_tokens, corpus["prec_bm25"], corpus["prec_docs"], "precedent", "case_number")
+
+        # ── Dense (pgvector, similarity score 포함) ───────────────────
+        query_vec = embed_query(payload["dense_query"], "embed_vertex")
+        dense_law_scores, dense_prec_scores = self._pgvector_scores(query_vec, TOP_K * 2)
+
+        # ── Min-Max 정규화 (평가와 동일: 법령+판례 합친 풀에서 정규화) ──
+        # 법령 id(clause_key)와 판례 id(case_number)는 ID 공간이 달라 충돌 없음.
+        bm25_raw_all  = {d: s for d, (_, __, s) in {**bm25_law_scores,  **bm25_prec_scores}.items()}
+        dense_raw_all = {d: s for d, (_, __, s) in {**dense_law_scores, **dense_prec_scores}.items()}
+        norm_bm25  = self._minmax(bm25_raw_all)
+        norm_dense = self._minmax(dense_raw_all)
+
+        # ── Alpha Hybrid (법령/판례 독립 랭킹, 각자 rank 1~TOP_K) ──────
+        law_results  = self._alpha_hybrid(bm25_law_scores,  dense_law_scores,  norm_bm25, norm_dense, ALPHA_LAW,  "law",       TOP_K)
+        prec_results = self._alpha_hybrid(bm25_prec_scores, dense_prec_scores, norm_bm25, norm_dense, ALPHA_PREC, "precedent", TOP_K)
+
+        # BM25 / Dense 결과 목록 (디버깅/검증용)
+        bm25_list = sorted(
+            [{"doc_id": d, "source_type": st, "rank": r}
+             for d, (r, st, _) in {**bm25_law_scores, **bm25_prec_scores}.items()],
+            key=lambda x: x["rank"],
+        )
+        dense_list = sorted(
+            [{"doc_id": d, "source_type": st, "rank": r}
+             for d, (r, st, _) in {**dense_law_scores, **dense_prec_scores}.items()],
+            key=lambda x: x["rank"],
+        )
+
+        return {"bm25": bm25_list, "dense": dense_list, "law": law_results, "prec": prec_results}
+
+    # ------------------------------------------------------------------ #
+    # BM25 점수 수집                                                       #
+    # ------------------------------------------------------------------ #
+
+    def _bm25_scores(
+        self,
+        query_tokens: list[str],
+        bm25,
+        docs: list[dict],
+        source_type: str,
+        id_field: str,
+    ) -> dict[str, tuple[int, str, float]]:
+        """doc_id → (rank, source_type, raw_score) 반환."""
+        scores  = bm25.get_scores(query_tokens)
+        top_idx = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:TOP_K * 2]
+        return {
+            docs[idx][id_field]: (rank, source_type, float(scores[idx]))
+            for rank, idx in enumerate(top_idx, 1)
+        }
+
+    # ------------------------------------------------------------------ #
+    # Dense 점수 수집 (pgvector)                                          #
+    # ------------------------------------------------------------------ #
+
+    def _pgvector_scores(
+        self,
+        query_vec,
+        top_k: int,
+    ) -> tuple[dict[str, tuple[int, str, float]], dict[str, tuple[int, str, float]]]:
+        """법령/판례 각각 doc_id → (rank, source_type, similarity) 반환."""
+        from sqlalchemy import text
         from shared.db.connection import get_db_client
 
-        # numpy ndarray → '[f0,f1,...,fn]' 문자열
         vec_literal = "[" + ",".join(str(float(x)) for x in query_vec) + "]"
-        max_dist = _MAX_DIST
-
-        db = get_db_client()
+        max_dist    = _MAX_DIST
+        db          = get_db_client()
 
         law_rows = db.fetch_all(
             text(f"""
-                SELECT clause_key::text AS doc_id
+                SELECT clause_key::text AS doc_id,
+                       1.0 - (embed_vertex <=> '{vec_literal}'::vector) AS similarity
                 FROM   law_child
                 WHERE  embed_vertex IS NOT NULL
                   AND  embed_vertex <=> '{vec_literal}'::vector <= {max_dist}
@@ -134,7 +211,8 @@ class RetrievalService:
 
         prec_rows = db.fetch_all(
             text(f"""
-                SELECT case_number::text AS doc_id
+                SELECT case_number::text AS doc_id,
+                       1.0 - (embed_vertex <=> '{vec_literal}'::vector) AS similarity
                 FROM   case_law
                 WHERE  embed_vertex IS NOT NULL
                   AND  embed_vertex <=> '{vec_literal}'::vector <= {max_dist}
@@ -144,112 +222,59 @@ class RetrievalService:
             {"top_k": top_k},
         )
 
-        hits: dict[str, tuple[int, str]] = {}
-        for rank, row in enumerate(law_rows, 1):
-            hits[str(row["doc_id"])] = (rank, "law")
-        for rank, row in enumerate(prec_rows, 1):
-            doc_id = str(row["doc_id"])
-            # 동일 doc_id가 두 테이블에 겹칠 일은 없지만 방어적으로 처리
-            if doc_id not in hits or rank < hits[doc_id][0]:
-                hits[doc_id] = (rank, "precedent")
+        law_scores  = {str(r["doc_id"]): (rank, "law",       float(r["similarity"])) for rank, r in enumerate(law_rows,  1)}
+        prec_scores = {str(r["doc_id"]): (rank, "precedent", float(r["similarity"])) for rank, r in enumerate(prec_rows, 1)}
 
-        log.debug(
-            "  pgvector 결과: 법령 %d건, 판례 %d건",
-            len(law_rows),
-            len(prec_rows),
-        )
-        return hits
+        return law_scores, prec_scores
 
     # ------------------------------------------------------------------ #
-    # 하이브리드 검색 (BM25 + Dense → RRF)                                #
+    # Alpha Hybrid 융합                                                    #
     # ------------------------------------------------------------------ #
 
-    def retrieve(self, payload: dict) -> dict:
-        """BM25 → Dense(pgvector) → RRF 실행.
+    @staticmethod
+    def _minmax(scores: dict[str, float]) -> dict[str, float]:
+        if not scores:
+            return {}
+        lo, hi = min(scores.values()), max(scores.values())
+        if hi == lo:
+            return {k: 0.0 for k in scores}
+        return {k: (v - lo) / (hi - lo) for k, v in scores.items()}
 
-        Parameters
-        ----------
-        payload:
-            build_retrieval_payload() 결과.
-            필수 키: "bm25_keywords" (list[str]), "dense_query" (str)
+    def _alpha_hybrid(
+        self,
+        bm25_scores:  dict[str, tuple[int, str, float]],
+        dense_scores: dict[str, tuple[int, str, float]],
+        norm_bm25:  dict[str, float],
+        norm_dense: dict[str, float],
+        alpha: float,
+        source_type: str,
+        top_k: int,
+    ) -> list[dict]:
+        """alpha * norm_bm25 + (1-alpha) * norm_dense 로 융합 후 상위 top_k 반환.
 
-        Returns
-        -------
-        dict with keys:
-            "bm25"  : BM25 순위 목록
-            "dense" : Dense 순위 목록
-            "rrf"   : RRF 융합 순위 목록
-        각 항목: {"doc_id", "source_type", "rank", ...}
+        norm_bm25/norm_dense 는 법령+판례 합친 풀에서 이미 정규화된 값(평가와 동일).
+        이 도메인(source_type)에 속한 doc_id 들만 골라 랭킹한다.
         """
-        from pipeline.retrieval.bm25_retrieval import build_query_tokens
-        from pipeline.retrieval.dense_retrieval import embed_query
+        all_ids = set(bm25_scores) | set(dense_scores)
+        scored  = []
+        for doc_id in all_ids:
+            nb     = norm_bm25.get(doc_id,  0.0)
+            nd     = norm_dense.get(doc_id, 0.0)
+            hybrid = alpha * nb + (1.0 - alpha) * nd
+            scored.append({
+                "doc_id":       doc_id,
+                "source_type":  source_type,
+                "rank":         0,
+                "hybrid_score": round(hybrid, 6),
+                "bm25_rank":    bm25_scores[doc_id][0]  if doc_id in bm25_scores  else None,
+                "dense_rank":   dense_scores[doc_id][0] if doc_id in dense_scores else None,
+            })
 
-        corpus = self.corpus
-
-        # ── BM25 ──────────────────────────────────────────────────────
-        query_tokens = build_query_tokens(payload["bm25_keywords"])
-        bm25_hits: dict[str, tuple[int, str]] = {}
-        for docs, bm25, source_type, id_field in [
-            (corpus["law_docs"], corpus["law_bm25"], "law", "clause_key"),
-            (corpus["prec_docs"], corpus["prec_bm25"], "precedent", "case_number"),
-        ]:
-            scores = bm25.get_scores(query_tokens)
-            top_idx = sorted(
-                range(len(scores)), key=lambda i: scores[i], reverse=True
-            )[:TOP_K]
-            for rank, idx in enumerate(top_idx, 1):
-                bm25_hits[docs[idx][id_field]] = (rank, source_type)
-
-        # ── Dense (pgvector) ──────────────────────────────────────────
-        query_vec = embed_query(payload["dense_query"], "embed_vertex")
-        dense_hits = self._pgvector_search(query_vec, TOP_K)
-
-        # ── RRF ───────────────────────────────────────────────────────
-        scored = []
-        for doc_id in set(bm25_hits) | set(dense_hits):
-            b_rank = bm25_hits[doc_id][0] if doc_id in bm25_hits else 1000
-            d_rank = dense_hits[doc_id][0] if doc_id in dense_hits else 1000
-            source_type = (bm25_hits.get(doc_id) or dense_hits.get(doc_id))[1]
-            scored.append(
-                {
-                    "doc_id": doc_id,
-                    "source_type": source_type,
-                    "rrf_score": round(
-                        1 / (RRF_K + b_rank) + 1 / (RRF_K + d_rank), 6
-                    ),
-                    "bm25_rank": b_rank if b_rank != 1000 else None,
-                    "dense_rank": d_rank if d_rank != 1000 else None,
-                }
-            )
-
-        scored.sort(
-            key=lambda x: (
-                -x["rrf_score"],
-                x["bm25_rank"] if x["bm25_rank"] is not None else 1000,
-                x["dense_rank"] if x["dense_rank"] is not None else 1000,
-                x["doc_id"],
-            )
-        )
-        rrf_results = scored[:TOP_K]
-        for rank, item in enumerate(rrf_results, 1):
+        scored.sort(key=lambda x: x["hybrid_score"], reverse=True)
+        top = scored[:top_k]
+        for rank, item in enumerate(top, 1):  # 도메인 내 독립 rank 1~top_k
             item["rank"] = rank
-
-        bm25_results = sorted(
-            [
-                {"doc_id": d, "source_type": st, "rank": r}
-                for d, (r, st) in bm25_hits.items()
-            ],
-            key=lambda x: x["rank"],
-        )
-        dense_results = sorted(
-            [
-                {"doc_id": d, "source_type": st, "rank": r}
-                for d, (r, st) in dense_hits.items()
-            ],
-            key=lambda x: x["rank"],
-        )
-
-        return {"bm25": bm25_results, "dense": dense_results, "rrf": rrf_results}
+        return top
 
 
 retrieval_service = RetrievalService()

@@ -50,7 +50,8 @@ class ClauseAnalysisResponse(BaseModel):
     index: int
     clause: str
     expansion: ClauseQueryExpansion
-    top_results: list[RankedDocument]
+    law_results: list[RankedDocument]   # 법령 (rank 1~TOP_K, 독립)
+    prec_results: list[RankedDocument]  # 판례 (rank 1~TOP_K, 독립)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ class RetrievalHit(BaseModel):
     doc_id: str
     source_type: str          # "law" | "precedent"
     rank: int
-    rrf_score: float | None = None
+    hybrid_score: float | None = None
     bm25_rank: int | None = None
     dense_rank: int | None = None
 
@@ -94,7 +95,8 @@ class RetrievalHit(BaseModel):
 class ClauseRetrievalResult(BaseModel):
     bm25: list[RetrievalHit]
     dense: list[RetrievalHit]
-    rrf: list[RetrievalHit]
+    law: list[RetrievalHit]   # alpha hybrid 법령 (rank 1~TOP_K, 독립)
+    prec: list[RetrievalHit]  # alpha hybrid 판례 (rank 1~TOP_K, 독립)
 
 
 class ClauseRetrieval(BaseModel):
@@ -118,7 +120,7 @@ class RankedDocument(BaseModel):
     rank: int
     doc_id: str
     source_type: str          # "law" | "precedent"
-    rrf_score: float
+    hybrid_score: float
     bm25_rank: int | None = None
     dense_rank: int | None = None
     # 문서 내용 (DB에서 조회)
@@ -129,7 +131,8 @@ class RankedDocument(BaseModel):
 class ClauseRanking(BaseModel):
     index: int
     clause: str
-    top_results: list[RankedDocument]
+    law_results: list[RankedDocument]   # 법령 (rank 1~TOP_K, 독립)
+    prec_results: list[RankedDocument]  # 판례 (rank 1~TOP_K, 독립)
 
 
 class RerankingResponse(BaseModel):

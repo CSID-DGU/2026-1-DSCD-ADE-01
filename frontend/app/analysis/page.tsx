@@ -89,21 +89,21 @@ export default function AnalysisPage() {
               const termLaws: LawItem[] = [];
               const termPrecedents: PrecedentItem[] = [];
 
-              data.top_results.forEach((doc: any) => {
-                if (doc.source_type === "law") {
-                  termLaws.push({
-                    rank: termLaws.length + 1,
-                    name: doc.title,
-                    detail: doc.content
-                  });
-                } else if (doc.source_type === "precedent") {
-                  termPrecedents.push({
-                    title: doc.title,
-                    tags: ["#관련판례"],
-                    facts: [{ label: "판결 요지", text: doc.content }],
-                    guide: []
-                  });
-                }
+              (data.law_results ?? []).forEach((doc: any) => {
+                termLaws.push({
+                  rank: termLaws.length + 1,
+                  name: doc.title,
+                  detail: doc.content
+                });
+              });
+
+              (data.prec_results ?? []).forEach((doc: any) => {
+                termPrecedents.push({
+                  title: doc.title,
+                  tags: ["#관련판례"],
+                  facts: [{ label: "판결 요지", text: doc.content }],
+                  guide: []
+                });
               });
 
               setClauseResults(prev => ({

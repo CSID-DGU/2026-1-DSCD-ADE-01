@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 # 특약 병렬 처리 스레드 수
 CLAUSE_WORKERS = 4
 # reranking 단계에서 반환할 상위 문서 수
-RERANKING_TOP_N = 5
+RERANKING_TOP_N = 20
 
 _clause_executor = ThreadPoolExecutor(max_workers=CLAUSE_WORKERS, thread_name_prefix="clause")
 
@@ -239,7 +239,8 @@ async def analyze_single_clause(request: AnalyzeClauseRequest) -> ClauseAnalysis
         index=request.clause_index,
         clause=request.clause_text,
         expansion=expansion.expansion,
-        top_results=ranking_res[0].top_results if ranking_res else []
+        law_results=ranking_res[0].law_results if ranking_res else [],
+        prec_results=ranking_res[0].prec_results if ranking_res else [],
     )
 
 # ──────────────────────────────────────────────────────────────────────
@@ -385,61 +386,57 @@ def _retrieve_clause(clause: ClauseExpansion) -> ClauseRetrieval:
         retrieval_results=ClauseRetrievalResult(
             bm25=[RetrievalHit(**h) for h in raw["bm25"]],
             dense=[RetrievalHit(**h) for h in raw["dense"]],
-            rrf=[RetrievalHit(**h) for h in raw["rrf"]],
+            law=[RetrievalHit(**h) for h in raw["law"]],
+            prec=[RetrievalHit(**h) for h in raw["prec"]],
         ),
     )
 
 
 def _rerank_all(clauses: list[ClauseRetrieval]) -> list[ClauseRanking]:
-    """RRF 상위 RERANKING_TOP_N 결과에 문서 내용을 조회해 반환한다."""
-    # 1) 모든 특약의 RRF top-N 결과에서 doc_id 수집
+    """법령/판례 각각 상위 RERANKING_TOP_N 결과에 문서 내용을 조회해 반환한다.
+
+    법령/판례는 독립 랭킹(각자 rank 1~N)이므로 분리하여 반환한다.
+    """
+    # 1) 모든 특약의 법령/판례 top-N 결과에서 doc_id 수집
     law_ids: set[str] = set()
     prec_ids: set[str] = set()
     for clause in clauses:
-        for hit in clause.retrieval_results.rrf[:RERANKING_TOP_N]:
-            if hit.source_type == "law":
-                law_ids.add(hit.doc_id)
-            else:
-                prec_ids.add(hit.doc_id)
+        for hit in clause.retrieval_results.law[:RERANKING_TOP_N]:
+            law_ids.add(hit.doc_id)
+        for hit in clause.retrieval_results.prec[:RERANKING_TOP_N]:
+            prec_ids.add(hit.doc_id)
 
     # 2) 배치 조회
     law_content = _fetch_law_content(list(law_ids))
     prec_content = _fetch_prec_content(list(prec_ids))
 
-    # 3) 결과 조합
+    # 3) 결과 조합 (법령/판례 분리)
     ranked_clauses: list[ClauseRanking] = []
     for clause in clauses:
-        top: list[RankedDocument] = []
-        for hit in clause.retrieval_results.rrf[:RERANKING_TOP_N]:
-            if hit.source_type == "law":
-                doc = law_content.get(hit.doc_id, {})
-                title = (
-                    f"{doc.get('law_name', '')} "
-                    f"제{doc.get('article_no', '')}조"
-                    f"{' 제' + str(doc.get('paragraph_no', '')) + '항' if doc.get('paragraph_no') else ''}"
-                ).strip()
-                
-                parent_txt = doc.get("parent_text") or ""
-                child_txt = doc.get("child_text") or ""
-                
-                # 조항 전체 내용(parent)과 해당 항의 내용(child)을 조합
-                if not parent_txt:
-                    content = child_txt
-                elif child_txt in parent_txt:
-                    content = parent_txt
-                else:
-                    content = f"{parent_txt}\n\n{child_txt}"
-            else:
-                doc = prec_content.get(hit.doc_id, {})
-                title = doc.get("case_name") or hit.doc_id
-                content = doc.get("judgment_summary") or doc.get("issue") or ""
+        law_top: list[RankedDocument] = []
+        for hit in clause.retrieval_results.law[:RERANKING_TOP_N]:
+            doc = law_content.get(hit.doc_id, {})
+            title = (
+                f"{doc.get('law_name', '')} "
+                f"제{doc.get('article_no', '')}조"
+                f"{' 제' + str(doc.get('paragraph_no', '')) + '항' if doc.get('paragraph_no') else ''}"
+            ).strip()
 
-            top.append(
+            parent_txt = doc.get("parent_text") or ""
+            child_txt = doc.get("child_text") or ""
+            if not parent_txt:
+                content = child_txt
+            elif child_txt in parent_txt:
+                content = parent_txt
+            else:
+                content = f"{parent_txt}\n\n{child_txt}"
+
+            law_top.append(
                 RankedDocument(
                     rank=hit.rank,
                     doc_id=hit.doc_id,
                     source_type=hit.source_type,
-                    rrf_score=hit.rrf_score or 0.0,
+                    hybrid_score=hit.hybrid_score or 0.0,
                     bm25_rank=hit.bm25_rank,
                     dense_rank=hit.dense_rank,
                     title=title,
@@ -447,7 +444,33 @@ def _rerank_all(clauses: list[ClauseRetrieval]) -> list[ClauseRanking]:
                 )
             )
 
-        ranked_clauses.append(ClauseRanking(index=clause.index, clause=clause.clause, top_results=top))
+        prec_top: list[RankedDocument] = []
+        for hit in clause.retrieval_results.prec[:RERANKING_TOP_N]:
+            doc = prec_content.get(hit.doc_id, {})
+            title = doc.get("case_name") or hit.doc_id
+            content = doc.get("judgment_summary") or doc.get("issue") or ""
+
+            prec_top.append(
+                RankedDocument(
+                    rank=hit.rank,
+                    doc_id=hit.doc_id,
+                    source_type=hit.source_type,
+                    hybrid_score=hit.hybrid_score or 0.0,
+                    bm25_rank=hit.bm25_rank,
+                    dense_rank=hit.dense_rank,
+                    title=title,
+                    content=content,
+                )
+            )
+
+        ranked_clauses.append(
+            ClauseRanking(
+                index=clause.index,
+                clause=clause.clause,
+                law_results=law_top,
+                prec_results=prec_top,
+            )
+        )
 
     return ranked_clauses
 
