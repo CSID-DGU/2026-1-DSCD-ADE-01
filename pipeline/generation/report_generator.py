@@ -307,17 +307,19 @@ def dedup_related_clauses(clause_results: list[dict]) -> list[dict]:
     return clause_results
 
 
-def load_from_rag_result(rag_path: str) -> tuple[dict, list, list, dict]:
+def load_from_rag_result(rag_path: str) -> tuple[dict, list, list]:
     """
-    test_rag_one_contract.py 결과 JSON을 읽어
-    (property_info, common_terms, clauses_with_hits, {}) 반환.
+    RAG 결과 JSON을 읽어 (property_info, common_terms, clauses_with_hits) 반환.
+
+    신규 포맷: clauses[].law_results / clauses[].precedent_results 분리
+    구버전 포맷: clauses[].top_results (source_type 필드로 구분) — 하위 호환 유지
 
     clauses_with_hits 각 항목:
         {
-            "index":   int,          # 절대 인덱스 (COMMON_TERMS_COUNT+1 ~)
-            "clause":  str,          # 특약 원문
-            "laws":    list[dict],   # source_type == "law" 인 top_results
-            "precs":   list[dict],   # source_type == "precedent" 인 top_results
+            "index":   int,        # 절대 인덱스 (COMMON_TERMS_COUNT+1 ~)
+            "clause":  str,        # 특약 원문
+            "laws":    list[dict], # 법령 검색 결과
+            "precs":   list[dict], # 판례 검색 결과
         }
     """
     data = load_json(rag_path)
@@ -325,8 +327,14 @@ def load_from_rag_result(rag_path: str) -> tuple[dict, list, list, dict]:
     common_terms  = data.get("common_terms", [])
     clauses_with_hits = []
     for item in data.get("clauses", []):
-        laws  = [r for r in item.get("top_results", []) if r.get("source_type") == "law"]
-        precs = [r for r in item.get("top_results", []) if r.get("source_type") == "precedent"]
+        # 신규 포맷: law_results / precedent_results
+        if "law_results" in item or "precedent_results" in item:
+            laws  = item.get("law_results", [])
+            precs = item.get("precedent_results", [])
+        # 구버전 포맷: top_results + source_type 필터
+        else:
+            laws  = [r for r in item.get("top_results", []) if r.get("source_type") == "law"]
+            precs = [r for r in item.get("top_results", []) if r.get("source_type") == "precedent"]
         clauses_with_hits.append({
             "index":  item["index"],
             "clause": item["clause"],
@@ -781,11 +789,11 @@ def main():
     if args.rag_result:
         rag_path = Path(args.rag_result)
 
-        # 폴더 지정 시 → test_rag_*.json 전부 처리
+        # 폴더 지정 시 → *_rag.json 또는 test_rag_*.json 전부 처리
         if rag_path.is_dir():
-            files = sorted(rag_path.glob("test_rag_*.json"))
+            files = sorted(rag_path.glob("*_rag.json")) or sorted(rag_path.glob("test_rag_*.json"))
             if not files:
-                print(f"[경고] {rag_path} 에서 test_rag_*.json 파일을 찾을 수 없습니다.")
+                print(f"[경고] {rag_path} 에서 *_rag.json 파일을 찾을 수 없습니다.")
                 return
             print(f"[폴더 모드] {len(files)}개 파일 처리 시작")
             for f in files:
