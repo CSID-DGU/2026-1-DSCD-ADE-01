@@ -1,6 +1,7 @@
 "use client";
 
 import { Bell, Settings, User } from "lucide-react";
+import { useRouter } from "next/navigation";
 
 export type NavTab = "analysis" | "chatbot";
 
@@ -19,6 +20,8 @@ export function TopNavBar({
   activeTab = "analysis",
   onTabChange,
 }: TopNavBarProps) {
+  const router = useRouter();
+
   const chipText =
     mode === "upload"
       ? (fileName?.trim() || "계약서를 업로드 해주세요")
@@ -42,7 +45,10 @@ export function TopNavBar({
       >
         {/* Left: Logo + chip + status */}
         <div className="flex min-w-0 flex-wrap items-center gap-2 justify-self-start sm:gap-3">
-          <div className="flex items-center gap-2">
+          <div 
+            className="flex items-center gap-2 cursor-pointer"
+            onClick={() => router.push('/')}
+          >
             <svg width="16" height="20" viewBox="0 0 16 20" fill="none">
               <rect width="16" height="20" rx="2" fill="white" />
               <rect x="3" y="5" width="10" height="1.5" rx="0.75" fill="#1E293B" />
