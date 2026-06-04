@@ -350,6 +350,7 @@ def build_repair_prompt(
     return base
 
 
+@lru_cache(maxsize=1024)
 def expand_clause(
     clause_text: str,
     *,

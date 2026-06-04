@@ -28,6 +28,7 @@ from sqlalchemy import text
 from app.schemas import (
     AnalyzeClauseRequest,
     ClauseAnalysisResponse,
+    ClauseAnalysisV2Response,
     ClauseExpansion,
     ClauseRanking,
     ClauseRetrieval,
@@ -39,19 +40,24 @@ from app.schemas import (
     LayoutParseResponse,
     QueryExpansionResponse,
     RankedDocument,
+    ReportRequest,
+    ReportV2Request,
     RerankingResponse,
     RetrievalHit,
     RetrievalResponse,
 )
 from pipeline.preprocessing.schema import LeaseContract
+from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
 from pipeline.retrieval.retrieval_service import retrieval_service
+from pipeline.generation.report_generator import generate_report_from_data, ReportOutput
+from pipeline.generation.report_generator_v2 import generate_clause_summary, generate_final_report, FinalReportOutput, COMMON_TERMS_COUNT
 from shared.db.connection import get_db_client
 from shared.storage.gcs_client import get_gcs_client
 
 log = logging.getLogger(__name__)
 
 # 특약 병렬 처리 스레드 수
-CLAUSE_WORKERS = 4
+CLAUSE_WORKERS = 50
 # reranking 단계에서 반환할 상위 문서 수
 RERANKING_TOP_N = 20
 
@@ -226,7 +232,57 @@ async def analyze_single_clause(request: AnalyzeClauseRequest) -> ClauseAnalysis
     if not retrieval_service.is_ready:
         raise HTTPException(status_code=503, detail="코퍼스 로딩 중")
 
-    # 1. 쿼리 확장
+    # 1. 쿼리 확장 (상위 COMMON_TERMS_COUNT개 특약은 건너뜀)
+    if request.clause_index < COMMON_TERMS_COUNT:
+        return ClauseAnalysisResponse(
+            index=request.clause_index,
+            clause=request.clause_text,
+            expansion=ClauseQueryExpansion(expansion_query="", keywords=[]),
+            law_results=[],
+            prec_results=[],
+        )
+    
+    expansion = await _run_in_executor(_expand_clause, request.clause_index, request.clause_text)
+
+
+@app.post("/api/analyze/report", response_model=ReportOutput)
+async def analyze_report(request: ReportRequest) -> ReportOutput:
+    """모든 특약의 분석 결과를 취합하여 최종 체크리스트와 보고서를 생성한다."""
+    if not retrieval_service.is_ready:
+        raise HTTPException(status_code=503, detail="코퍼스 로딩 중")
+
+    def _run_report_gen():
+        clauses_with_hits_dict = [c.model_dump() for c in request.clauses_with_hits]
+        return generate_report_from_data(
+            property_info=request.property_info,
+            common_terms=request.common_terms,
+            clauses_with_hits=clauses_with_hits_dict
+        )
+
+    return await _run_in_executor(_run_report_gen)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# V2 비동기/병렬 파이프라인 엔드포인트
+# ──────────────────────────────────────────────────────────────────────
+
+@app.post("/api/analyze/clause_v2", response_model=ClauseAnalysisV2Response)
+async def analyze_single_clause_v2(request: AnalyzeClauseRequest) -> ClauseAnalysisV2Response:
+    """단일 특약에 대해 [QE -> 검색 -> LLM 요약]까지 논스톱으로 실행한다."""
+    if not retrieval_service.is_ready:
+        raise HTTPException(status_code=503, detail="코퍼스 로딩 중")
+
+    # 1. 쿼리 확장 (상위 COMMON_TERMS_COUNT개 특약은 건너뜀)
+    if request.clause_index < COMMON_TERMS_COUNT:
+        return ClauseAnalysisV2Response(
+            index=request.clause_index,
+            clause=request.clause_text,
+            expansion=ClauseQueryExpansion(expansion_query="", keywords=[]),
+            law_results=[],
+            prec_results=[],
+            llm_related_laws=[],
+        )
+    
     expansion = await _run_in_executor(_expand_clause, request.clause_index, request.clause_text)
 
     # 2. 하이브리드 검색
@@ -234,14 +290,43 @@ async def analyze_single_clause(request: AnalyzeClauseRequest) -> ClauseAnalysis
 
     # 3. 리랭킹 및 문서 내용 병합
     ranking_res = await _run_in_executor(_rerank_all, [retrieval_res])
+    
+    law_results = ranking_res[0].law_results if ranking_res else []
+    prec_results = ranking_res[0].prec_results if ranking_res else []
 
-    return ClauseAnalysisResponse(
+    # 4. LLM 요약 (개별)
+    def _run_llm_summary():
+        laws_dict = [d.model_dump() for d in law_results]
+        precs_dict = [d.model_dump() for d in prec_results]
+        # lru_cache를 위해 hashable한 타입(str)으로 변환
+        laws_json = json.dumps(laws_dict, sort_keys=True)
+        precs_json = json.dumps(precs_dict, sort_keys=True)
+        return generate_clause_summary(request.clause_text, laws_json, precs_json)
+    
+    llm_related_laws = await _run_in_executor(_run_llm_summary)
+
+    return ClauseAnalysisV2Response(
         index=request.clause_index,
         clause=request.clause_text,
         expansion=expansion.expansion,
-        law_results=ranking_res[0].law_results if ranking_res else [],
-        prec_results=ranking_res[0].prec_results if ranking_res else [],
+        law_results=law_results,
+        prec_results=prec_results,
+        llm_related_laws=llm_related_laws,
     )
+
+
+@app.post("/api/analyze/report_v2", response_model=FinalReportOutput)
+async def analyze_report_v2(request: ReportV2Request) -> FinalReportOutput:
+    """모든 특약의 요약 결과를 바탕으로 최종 체크리스트와 연관성 분석을 수행한다."""
+    def _run_final_report_gen():
+        clauses_with_summaries_dict = [c.model_dump() for c in request.clauses_with_summaries]
+        return generate_final_report(
+            property_info=request.property_info,
+            common_terms=request.common_terms,
+            clauses_with_hits_and_summaries=clauses_with_summaries_dict
+        )
+
+    return await _run_in_executor(_run_final_report_gen)
 
 # ──────────────────────────────────────────────────────────────────────
 # 기존 (레거시) API 들 - 필요시 삭제 가능
@@ -314,22 +399,50 @@ async def _expand_all(contract: LeaseContract) -> list[ClauseExpansion]:
     special_terms = [t.strip() for t in contract.special_terms if t.strip()]
 
     loop = asyncio.get_event_loop()
-    tasks = [
-        loop.run_in_executor(_clause_executor, _expand_clause, i, term)
-        for i, term in enumerate(special_terms)
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    # Pre-allocate a list for all expansions, with placeholders for skipped terms
+    all_expansions: list[ClauseExpansion | Any] = [None] * len(special_terms)
+    
+    tasks = []
+    task_indices = [] # To keep track of original indices for tasks
 
-    clauses: list[ClauseExpansion] = []
-    for i, result in enumerate(results):
+    for i, term in enumerate(special_terms):
+        if i < COMMON_TERMS_COUNT:
+            # For the first COMMON_TERMS_COUNT terms, create a placeholder
+            all_expansions[i] = ClauseExpansion(
+                index=i,
+                clause=term,
+                expansion=ClauseQueryExpansion(expansion_query="", keywords=[]),
+                retrieval_payload={},
+            )
+        else:
+            # For other terms, create a task for expansion
+            tasks.append(loop.run_in_executor(_clause_executor, _expand_clause, i, term))
+            task_indices.append(i)
+
+    # Execute tasks for non-common terms
+    expanded_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    # Populate all_expansions list with results from executor
+    for task_idx, result in zip(task_indices, expanded_results):
         if isinstance(result, Exception):
-            log.error("특약 %d 쿼리 확장 실패: %s", i, result)
+            log.error("특약 %d 쿼리 확장 실패: %s", task_idx, result)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"특약 {i} 쿼리 확장 실패: {result}",
+                detail=f"특약 {task_idx} 쿼리 확장 실패: {result}",
             )
-        clauses.append(result)
-    return sorted(clauses, key=lambda c: c.index)
+        all_expansions[task_idx] = result
+            
+    # Ensure all elements are ClauseExpansion and handle potential None if something went wrong
+    final_clauses: list[ClauseExpansion] = []
+    for item in all_expansions:
+        if item is not None:
+            final_clauses.append(item)
+        else:
+            # This case should ideally not happen if logic is correct, but for safety
+            log.warning("Unexpected None in all_expansions list, skipping.")
+            
+    return sorted(final_clauses, key=lambda c: c.index)
 
 
 async def _retrieve_all(clauses: list[ClauseExpansion]) -> list[ClauseRetrieval]:
