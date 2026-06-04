@@ -551,17 +551,11 @@ JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
     return None
 
 
-def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
+def generate_report_from_data(property_info: dict, common_terms: list, clauses_with_hits: list) -> ReportOutput:
     """
-    test_rag_one_contract.py 결과 JSON 하나를 입력받아 보고서 생성.
-
-    사용법:
-        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json
-        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json --output path/to/report.json
+    RAG 결과 데이터를 직접 입력받아 LLM 보고서를 생성하고 반환합니다.
+    API 등에서 파일 I/O 없이 직접 호출할 때 사용합니다.
     """
-    print(f"[rag-result 모드] 입력: {rag_path}")
-    property_info, common_terms, clauses_with_hits = load_from_rag_result(rag_path)
-
     # 다른 특약 원문 리스트 (관계 분석용)
     all_target_terms = [c["clause"] for c in clauses_with_hits]
 
@@ -682,11 +676,25 @@ def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
     contract_checklist = checklist_result.get("contract_checklist", []) if checklist_result else []
     print("  [전체 체크리스트] 완료")
 
-    # ── 저장 ──────────────────────────────────────────────────────
-    final_output = ReportOutput(
+    return ReportOutput(
         contract_checklist=contract_checklist,
         clause_results=clause_results,
     )
+
+
+def run_from_rag_result(rag_path: str, output_path: str | None = None) -> None:
+    """
+    test_rag_one_contract.py 결과 JSON 하나를 입력받아 보고서 생성.
+
+    사용법:
+        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json
+        python pipeline/generation/report_generator.py --rag-result path/to/test_rag_104.json --output path/to/report.json
+    """
+    print(f"[rag-result 모드] 입력: {rag_path}")
+    property_info, common_terms, clauses_with_hits = load_from_rag_result(rag_path)
+
+    final_output = generate_report_from_data(property_info, common_terms, clauses_with_hits)
+
     if not output_path:
         stem = Path(rag_path).stem  # e.g. "test_rag_104"
         output_path = str(Path(rag_path).parent / f"{stem}_report.json")
