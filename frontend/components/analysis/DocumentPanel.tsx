@@ -1,5 +1,8 @@
 "use client";
 
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
 type GeneralTerm = {
   title: string;
   text: string;
@@ -18,6 +21,62 @@ export function DocumentPanel({
   generalTerms,
   onTermClick 
 }: DocumentPanelProps) {
+
+  // Simple pre-processor for messy table syntax
+  const preprocessMarkdown = (text: string) => {
+    if (!text) return "";
+    
+    // 1. If there are no newlines but many pipes, it's likely row-stuck.
+    // Replace "| |" with "|\n|" to force newlines between rows.
+    let processed = text.replace(/\|\s*\|/g, '|\n|');
+    
+    // 2. Handle the |-|-| separator
+    if (processed.includes('|-|-|')) {
+      const lines = processed.split('\n');
+      const newLines: string[] = [];
+      
+      lines.forEach(line => {
+        if (line.includes('|-|-|')) {
+          // If the line has text before |-|-|, push the text first, then a dummy header
+          const parts = line.split('|-|-|');
+          const before = parts[0].trim();
+          
+          if (before) {
+            newLines.push(before);
+          }
+          
+          // Generate a reasonable separator (cap at 10 columns)
+          // Count pipes in the NEXT line to guess columns
+          const nextLine = lines[lines.indexOf(line) + 1] || "";
+          const pipeCount = (nextLine.match(/\|/g) || []).length;
+          const colCount = Math.min(Math.max(pipeCount, 3), 10);
+          
+          // Dummy header row
+          newLines.push('|' + Array(colCount).fill(' ').join('|') + '|');
+          // Standard separator row
+          newLines.push('|' + Array(colCount).fill('---').join('|') + '|');
+        } else {
+          newLines.push(line);
+        }
+      });
+      processed = newLines.join('\n');
+    }
+    
+    return processed;
+  };
+
+  const MarkdownComponents = {
+    table: ({...props}) => (
+      <div className="my-4 overflow-x-auto rounded-lg border border-gray-200">
+        <table className="w-full border-collapse text-xs" {...props} />
+      </div>
+    ),
+    thead: ({...props}) => <thead className="bg-gray-50" {...props} />,
+    th: ({...props}) => <th className="border-b border-gray-200 px-3 py-2 text-left font-bold text-gray-700" {...props} />,
+    td: ({...props}) => <td className="border-b border-gray-100 px-3 py-2 text-gray-600 leading-relaxed" {...props} />,
+    p: ({...props}) => <p className="mb-2 last:mb-0" {...props} />,
+  };
+
   return (
     <section
       className="flex flex-col overflow-y-auto"
@@ -54,24 +113,64 @@ export function DocumentPanel({
       </div>
 
       <div className="flex flex-col gap-8 py-6">
-        {/* 1. 특약 사항 섹션 (최상단) */}
+        {/* 1. 분석 대상 특약 사항 */}
         {specialTerms.length > 0 && (
           <div className="flex flex-col gap-4">
             <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
               특약 사항
             </h3>
             <div className="flex flex-col gap-2">
-              {specialTerms.map((text, i) => (
-                <button
-                  key={i}
-                  onClick={() => onTermClick?.(i)}
-                  className="group flex flex-col gap-1 rounded-lg border border-gray-200 bg-gray-50 p-4 text-left transition hover:border-blue-300 hover:bg-blue-50 hover:shadow-sm"
+              {specialTerms.slice(6).map((text, i) => {
+                const absoluteIndex = i + 6;
+                return (
+                  <button
+                    key={`target-${i}`}
+                    onClick={() => onTermClick?.(absoluteIndex)}
+                    className="group flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-blue-300 hover:bg-blue-50 hover:shadow-sm"
+                  >
+                    <span className="text-[10px] font-bold text-gray-400 uppercase group-hover:text-blue-500">
+                      특약 {i + 1}
+                    </span>
+                    <div className="text-sm text-gray-800 leading-relaxed font-medium">
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        components={MarkdownComponents}
+                      >
+                        {preprocessMarkdown(text)}
+                      </ReactMarkdown>
+                    </div>
+                  </button>
+                );
+              })}
+              {specialTerms.length <= 6 && (
+                <p className="text-xs text-gray-400 italic px-3">추가 특약 없음</p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 2. 공통 특약 */}
+        {specialTerms.length >= 6 && (
+          <div className="flex flex-col gap-4">
+            <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
+              공통 특약
+            </h3>
+            <div className="flex flex-col gap-2">
+              {specialTerms.slice(0, 6).map((text, i) => (
+                <div
+                  key={`common-${i}`}
+                  className="flex flex-col gap-1 rounded-lg border border-gray-100 bg-gray-50/50 p-3 text-left"
                 >
-                  <span className="text-[10px] font-bold text-gray-400 uppercase group-hover:text-blue-500">특약 {i + 1}</span>
-                  <p className="text-sm text-gray-800 leading-relaxed font-medium">
-                    {text}
-                  </p>
-                </button>
+                  <span className="text-[9px] font-bold text-gray-300 uppercase">공통특약 {i + 1}</span>
+                  <div className="text-xs text-gray-600 leading-relaxed font-medium">
+                    <ReactMarkdown 
+                      remarkPlugins={[remarkGfm]}
+                      components={MarkdownComponents}
+                    >
+                      {preprocessMarkdown(text)}
+                    </ReactMarkdown>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
@@ -80,20 +179,25 @@ export function DocumentPanel({
         {/* 구분선 */}
         <div className="h-px bg-gray-100 mx-2" />
 
-        {/* 2. 일반 조항 섹션 */}
+        {/* 3. 일반 조항 섹션 */}
         {generalTerms.length > 0 && (
           <div className="flex flex-col gap-4">
-            <h3 className="px-2 text-sm font-black text-gray-500 uppercase tracking-widest border-l-4 border-gray-300">
+            <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
               일반 조항
             </h3>
             <div className="flex flex-col gap-4">
               {generalTerms.map((term, i) => (
                 <div key={i} className="flex flex-col gap-1 px-2">
                   <p className="text-xs font-bold text-gray-500">{term.title}</p>
-                  <div className="p-3 border rounded bg-white border-gray-100">
-                    <p className="text-xs text-gray-600 leading-relaxed">
-                      {term.text}
-                    </p>
+                  <div className="p-3 border rounded bg-white border-gray-100 overflow-hidden">
+                    <div className="text-xs text-gray-600 leading-relaxed">
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        components={MarkdownComponents}
+                      >
+                        {preprocessMarkdown(term.text)}
+                      </ReactMarkdown>
+                    </div>
                   </div>
                 </div>
               ))}
