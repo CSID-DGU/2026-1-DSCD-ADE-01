@@ -28,6 +28,7 @@ class LawType(str, Enum):
 class SelectedLaw(BaseModel):
     ref: str | None = None
     summary: str | None = None
+    is_violation: bool = False
 
 class ClauseSummaryOutput(BaseModel):
     selected_laws: list[SelectedLaw] = []
@@ -129,7 +130,13 @@ def build_clause_summary_prompt(
     all_doc_ids = [m.get("doc_id", "") for m in laws + precs if m.get("doc_id")]
     output_format = json.dumps(
         {
-            "selected_laws": [{"ref": "<위 목록의 doc_id 그대로>", "summary": "<일반인이 이해할 수 있는 설명>"}]
+            "selected_laws": [
+                {
+                    "ref": "<위 목록의 doc_id 그대로>", 
+                    "summary": "<일반인이 이해할 수 있는 설명>",
+                    "is_violation": "<true/false>"
+                }
+            ]
         },
         ensure_ascii=False,
         indent=2,
@@ -151,10 +158,23 @@ def build_clause_summary_prompt(
 - selected_laws: [관련 법령]과 [관련 판례] 중 반드시 이 특약과 **직접적으로 관련 있는 상위 3개 이내의 항목**만 골라 연관도 높은 순서로 작성하세요.
   *   **주의**: 제공된 리스트에 없는 법령 번호나 판례를 외부 지식으로 생성하여 포함하지 마세요. 반드시 대괄호 안의 식별자({', '.join(all_doc_ids)})만 사용해야 합니다.
   *   **주의**: 연관성이 낮거나 단순히 용어가 겹치는 정도의 항목은 과감하게 제외하세요. 정말로 관련 있는 항목이 없으면 빈 배열([])을 반환하세요.
-  summary는 법률 전문 지식이 없는 일반인도 이해할 수 있도록 작성하세요.
-    · 이 법령/판례가 무슨 내용인지 쉬운 말로 설명하고,
-    · 이 특약 내용을 반복하지 않고, 이 법령/판례가 특약에 미치는 영향이나 특약과의 구체적인 연관성을 서술하세요.
+  
+  is_violation 판단 기준:
+    · 특약 내용이 해당 법령의 **강행규정(임차인에게 불리한 약정은 효력이 없다는 규정 등)**에 명백히 위배되는 경우 `true`로 설정하세요.
+    · 판례상 임차인의 권리를 부당하게 제한한다고 판단된 사례와 유사한 경우 `true`로 설정하세요.
+    · 단순히 절차 안내이거나 상호 합의 가능한 범위 내의 사항이면 `false`로 설정하세요.
+
+  summary 작성 요령:
+    · 법률 전문 지식이 없는 일반인도 이해할 수 있도록 작성하세요.
+    · 이 법령/판례가 무슨 내용인지 쉬운 말로 설명하세요.
+    · **is_violation이 true인 경우**:
+        · 반드시 **어느 부분이 어떻게 법령에 위배되는지**, 그리고 **이 특약이 실제 법적 효력을 가질 수 있는지(무효 가능성 등)**를 매우 상세하고 구체적으로 서술하세요.
+        · 단순한 요약에 그치지 말고, 임차인이 이 조항을 보고 어떤 법적 권리를 주장할 수 있는지까지 상세히 안내하세요.
+    · **is_violation이 false인 경우**:
+        · 이 법령/판례가 특약에 미치는 영향이나 구체적인 연관성을 상식적인 수준에서 서술하세요.
+    · 이 특약 내용을 그대로 반복하지 마세요.
     · 전문 용어는 괄호 안에 풀어쓰세요. 예) "대항력(집을 팔아도 계속 살 수 있는 권리)"
+  
   summary 외에 다른 필드는 생성하지 마세요.
 - JSON 외 텍스트, 마크다운 코드블록은 포함하지 마세요.
 
@@ -170,7 +190,7 @@ def build_final_report_prompt(
     
     target_text_parts = []
     for item in target_terms_with_summaries:
-        idx = item['index'] - COMMON_TERMS_COUNT
+        idx = item['index'] - COMMON_TERMS_COUNT + 1
         clause_id = f"특약{idx}"
         target_text_parts.append(f"[{clause_id}]\n원문: {item['clause']}")
         if item.get('summaries'):
@@ -215,11 +235,15 @@ def build_final_report_prompt(
 1. contract_checklist: 임차인이 계약 전 확인해야 할 통합 체크리스트
 - 입력된 모든 특약을 종합 검토한 후, 확인 항목을 통합하여 작성하세요.
 - 계약서 전체 맥락에서 중요한 확인 사항을 도출하세요.
-- basis: 이 체크리스트 항목의 근거가 되는 특약 ID(예: "특약1", "공통특약 1")와 법령/판례 ref를 배열로 나열하세요. 위 내용에 등장한 식별자만 사용해야 합니다.
+- **주의**: 모든 인덱스는 1부터 시작합니다. **`특약0`은 존재하지 않으며 절대 사용하지 마세요.**
+- basis: 이 체크리스트 항목의 근거가 되는 특약 ID(예: "특약1", "공통특약 1")와 법령/판례 ref를 배열로 나열하세요. 반드시 본문에 등장한 식별자만 정확히 사용해야 합니다.
 
-2. clause_relations: 특약 간의 연관성 분석
-- [타겟 특약 전체]와 [공통 특약] 중 서로 동시에 적용될 때 확인이 필요하거나 충돌할 가능성이 있는 특약들의 관계를 분석하세요.
-- clause_id들은 반드시 "특약1", "공통특약 1" 형태의 ID를 사용하세요.
+2. clause_relations: 특약 간의 연관성 분석 (특약 vs 특약)
+- [타겟 특약 전체]와 [공통 특약] 중 서로 동시에 적용될 때 확인이 필요하거나 충돌할 가능성이 있는 **특약들끼리의 관계(Agreement-to-Agreement)**를 분석하세요.
+- **주의**: `특약0`은 절대 사용하지 마세요. 모든 식별자는 1번부터 시작합니다.
+- **주의**: 법령이나 판례와 특약의 관계는 이미 개별 요약에 포함되어 있으므로, 여기서는 절대 다루지 마세요. `clause_id`에 법령 식별자(예: 민법 제00조)를 넣는 것은 엄격히 금지됩니다.
+- `clause_id`들은 반드시 제공된 "특약1", "특약2", "공통특약 1" 형태의 식별자만 사용하세요.
+- **주의**: 각 특약의 원문 내용을 다른 특약 번호와 절대 혼동하지 마세요. 반드시 제공된 ID와 그에 해당하는 원문 내용을 정확히 매칭하여 분석하세요.
 - relation은 두 조항이 어떻게 연관되어 있으며 왜 주의해야 하는지 일반인 눈높이에서 설명하세요.
 - 연관성이 있는 특약에 대해서만 배열에 추가하세요.
 - clause_text는 null로 두세요.
@@ -330,7 +354,11 @@ def generate_clause_summary(target_clause: str, laws_json: str, precs_json: str)
         for sel in result.get("selected_laws", []):
             ref = (sel.get("ref") or "").strip()
             if ref in rag_map and ref not in covered:
-                related_laws.append({**rag_map[ref], "summary": sel.get("summary")})
+                related_laws.append({
+                    **rag_map[ref], 
+                    "summary": sel.get("summary"),
+                    "is_violation": sel.get("is_violation", False)
+                })
                 covered.add(ref)
 
     return related_laws
@@ -346,7 +374,7 @@ def generate_final_report(property_info: dict, common_terms: list, clauses_with_
 
     clause_text_map: dict[str, str] = {}
     for item in clauses_with_hits_and_summaries:
-        label = f"특약{item['index'] - COMMON_TERMS_COUNT}"
+        label = f"특약{item['index'] - COMMON_TERMS_COUNT + 1}"
         clause_text_map[label] = item["clause"]
     for i, term in enumerate(common_terms):
         clause_text_map[f"공통특약 {i + 1}"] = term
@@ -358,12 +386,16 @@ def generate_final_report(property_info: dict, common_terms: list, clauses_with_
 
     for cr in result.get("clause_relations", []):
         cid = cr.get("clause_id")
-        if not cid: continue
+        # cid가 실제 특약 목록에 존재하는 유효한 ID인지 검증
+        if not cid or cid not in clause_text_map:
+            continue
         
         valid_rels = []
         for rel in cr.get("related_clauses", []):
             other_id = rel.get("clause_id")
-            if not other_id: continue
+            # 상대방 ID도 유효한 특약 ID인지 검증
+            if not other_id or other_id not in clause_text_map:
+                continue
             
             pair = frozenset([cid, other_id])
             if pair not in seen_pairs:
@@ -374,7 +406,25 @@ def generate_final_report(property_info: dict, common_terms: list, clauses_with_
         if valid_rels:
             relations_map[cid] = valid_rels
 
+    # 체크리스트 후처리: 유효하지 않은 basis 필터링 및 텍스트 보정
+    final_checklist = []
+    for item in result.get("contract_checklist", []):
+        # 1. basis 필터링
+        if item.get("basis"):
+            # 유효한 ID(clause_text_map의 키) 또는 법령/판례 형식인 것만 유지
+            valid_basis = [
+                b for b in item["basis"] 
+                if b in clause_text_map or (re.search(r'[법령조항칙]', b) or len(b.split(",")) > 1)
+            ]
+            item["basis"] = [b for b in valid_basis if b != "특약0"] # 특약0은 무조건 제거
+
+        # 2. 설명 문구 보정 (특약0 언급 제거)
+        if item.get("description"):
+            item["description"] = item["description"].replace("특약0", "해당 특약")
+
+        final_checklist.append(item)
+
     return FinalReportOutput(
-        contract_checklist=result.get("contract_checklist", []),
+        contract_checklist=final_checklist,
         related_clauses_map=relations_map
     )
