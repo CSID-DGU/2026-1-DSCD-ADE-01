@@ -40,9 +40,14 @@ def _cells(line: str) -> list[str]:
 
 
 def _find_row(text: str, label: str) -> list[str]:
+    # 레이블의 각 글자 사이에 공백이 있을 수 있음을 고려한 정규식 생성
+    pattern = re.compile(r"\s*".join(re.escape(c) for l in label.split() for c in l))
     for line in text.splitlines():
-        if line.strip().startswith("|") and label in line:
-            return _cells(line)
+        if line.strip().startswith("|") and pattern.search(line):
+            cells = _cells(line)
+            # 데이터 행은 최소 2개 이상의 셀을 가짐 (제1조 등 제목 행 제외)
+            if len(cells) > 1:
+                return cells
     return []
 
 
@@ -89,17 +94,44 @@ def _date(text: str) -> str | None:
 
 
 def _checked(text: str, label: str) -> bool:
-    pattern = rf"[☑■✓]\s*{re.escape(label)}"
+    # 레이블의 각 글자 사이에 공백이 있을 수 있음을 고려
+    label_pattern = r"\s*".join(re.escape(c) for l in label.split() for c in l)
+    # ☑, ■, ✓ 외에도 ☒, [x], [v], V, v, X, x, O, o, * 등 다양한 체크 기호 대응
+    pattern = rf"(?:[☑■✓☒vVxXOo*]|\[[xXvV*]\])\s*{label_pattern}"
     return re.search(pattern, text) is not None
 
 
 def _lease_type(text: str) -> str:
+    # 1. 기존 체크박스 방식 시도 (가장 명확한 경우)
     if _checked(text, "보증금 있는 월세"):
         return "보증금있는월세"
     if _checked(text, "전세"):
         return "전세"
     if _checked(text, "월세"):
         return "월세"
+
+    # 여러 개의 '차임' 또는 '월세' 행 중 실데이터(숫자)가 포함된 행을 우선적으로 찾음
+    target_labels = ["차임", "월세"]
+    rent_content = ""
+    
+    for label in target_labels:
+        # 모든 라인을 검사하여 숫자가 있는 첫 번째 관련 행을 찾음
+        pattern = re.compile(r"\s*".join(re.escape(c) for c in label))
+        for line in text.splitlines():
+            if line.strip().startswith("|") and pattern.search(line):
+                cells = _cells(line)
+                if len(cells) > 1:
+                    content = " ".join(cells[1:]).strip()
+                    if re.search(r"\d", content):
+                        return "월세"
+                    if not rent_content: # 숫자가 없더라도 첫 번째로 발견된 내용은 저장
+                        rent_content = content
+
+    # 3. 폴백 (전세): '차임' 계열 행에 숫자가 없고(위에서 안 걸림), '전세' 키워드가 있는 경우
+    if ("전세" in text or "전세금" in text) and \
+       (not rent_content or any(word in rent_content for word in ["없음", "0", "-", "해당없음"])):
+        return "전세"
+
     raise RuleParseError("lease_type not found")
 
 
