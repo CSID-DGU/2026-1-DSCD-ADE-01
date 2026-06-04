@@ -71,8 +71,8 @@ class DBClient:
         return sqlalchemy.create_engine(
             "postgresql+pg8000://",
             creator=self._getconn,
-            pool_size=5,
-            max_overflow=2,
+            pool_size=30,
+            max_overflow=10,
             pool_timeout=30,
             pool_recycle=1800,
         )
