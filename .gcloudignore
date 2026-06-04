@@ -1,0 +1,65 @@
+# .gcloudignore
+# ==============================================================================
+# This file specifies which files should NOT be uploaded to Google Cloud Build.
+# It helps avoid "FileNotFoundError" for transient files and speeds up upload.
+# ==============================================================================
+
+# Git
+.git/
+.github/
+.gitignore
+
+# Node.js / Frontend (The API build doesn't need these)
+node_modules/
+frontend/
+.next/
+out/
+build/
+.firebase/
+
+# Python / Build
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.toast
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Data & Large Files (Essential data should be in GCS or DB, not image)
+data/
+outputs/
+output/
+*.pdf
+*.csv
+*.jsonl
+test.ipynb
+
+# Documentation & Misc
+docs/
+evaluation/
+tests/
+CLAUDE.md
+README.md
+.agents/
+.claude/
+.ouroboros/
+.codex
+cloudbuild.yaml
+scripts/
+infra/
+
+# Credentials
+.env
+.env.*
+*.json:Zone.Identifier

@@ -8,9 +8,11 @@
 - 휴대폰 번호 (``PHONE_MOBILE``)
 - 일반(시내) 전화번호 (``PHONE_LANDLINE``)
 - 서명란의 개인 주소 라인 (``ADDRESS``)
+- 임차할 부분 행 (``LEASED_PART``)
 
-이름은 다루지 않는다. 임차주택 소재지는 스키마 추출 대상이라 보존하고,
-``주 소 ...``처럼 서명란에 가까운 개인 주소 라인만 단순 마스킹한다.
+이름은 다루지 않는다. 임차주택 소재지는 스키마 추출 대상이라 보존하되,
+세부 호실 등 임차할 부분 행과 ``주 소 ...``처럼 서명란에 가까운 개인 주소
+라인은 단순 마스킹한다.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("EMAIL", re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")),
     ("PHONE_MOBILE", re.compile(r"\b01[016789]-?\d{3,4}-?\d{4}\b")),
     ("PHONE_LANDLINE", re.compile(r"\b0\d{1,2}-\d{3,4}-\d{4}\b")),
+    ("LEASED_PART", re.compile(r"(?m)^.*임차할\s*부분.*$")),
     ("ADDRESS", re.compile(r"(?m)^\s*주\s*소\s+.+$")),
 ]
 
