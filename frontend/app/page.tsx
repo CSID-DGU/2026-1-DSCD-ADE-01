@@ -91,7 +91,7 @@ export default function UploadPage() {
                 className="mt-2 text-sm"
                 style={{ color: "#43474E", fontFamily: "var(--font-public-sans)" }}
               >
-                PDF 또는 DOCX를 업로드하면 조항 추출과 위험 검토를 시작합니다.
+                PDF를 업로드하면 조항 추출과 위험 검토를 시작합니다.
               </p>
             </div>
           ) : (

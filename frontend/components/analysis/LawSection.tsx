@@ -5,13 +5,20 @@ export type LawItem = {
   name: string;
   warning?: string;
   detail?: string;
+  isViolation?: boolean;
 };
 
-function NumberBadge({ n }: { n: number }) {
+function NumberBadge({ n, isViolation }: { n: number; isViolation?: boolean }) {
   return (
     <div
       className="flex items-center justify-center shrink-0 rounded-sm text-xs font-medium"
-      style={{ width: "24px", height: "24px", background: "#D6E3FF", color: "#001B3C", fontFamily: "var(--font-alexandria)" }}
+      style={{ 
+        width: "24px", 
+        height: "24px", 
+        background: isViolation ? "#FEE2E2" : "#D6E3FF", 
+        color: isViolation ? "#991B1B" : "#001B3C", 
+        fontFamily: "var(--font-alexandria)" 
+      }}
     >
       {n}
     </div>
@@ -19,37 +26,46 @@ function NumberBadge({ n }: { n: number }) {
 }
 
 function LawCard({ item }: { item: LawItem }) {
+  const isViolation = item.isViolation || !!item.warning;
+
   return (
     <div
-      className="flex flex-col gap-[10px] p-3 rounded"
-      style={{ background: "#FFFFFF", border: "1px solid #E2E8F0", boxShadow: "0px 1px 2px rgba(0,0,0,0.05)" }}
+      className="flex flex-col gap-[10px] p-4 rounded-lg transition-all"
+      style={{ 
+        background: "#FFFFFF", 
+        border: isViolation ? "1.5px solid #F65746" : "1px solid #E2E8F0", 
+        boxShadow: isViolation ? "0px 4px 6px -1px rgba(246, 87, 70, 0.1)" : "0px 1px 2px rgba(0,0,0,0.05)" 
+      }}
     >
       {/* Law name row */}
-      <div className="flex flex-row items-center gap-[10px]">
-        <NumberBadge n={item.rank} />
+      <div className="flex flex-row items-center gap-[10px] flex-wrap">
+        <NumberBadge n={item.rank} isViolation={isViolation} />
         <p
-          className="text-sm font-semibold"
-          style={{ color: "#002045", fontFamily: "var(--font-public-sans)", lineHeight: "22px" }}
+          className="text-sm font-bold"
+          style={{ color: isViolation ? "#DC2626" : "#002045", fontFamily: "var(--font-public-sans)", lineHeight: "22px" }}
         >
           {item.name}
         </p>
+        {isViolation && (
+          <span className="px-2 py-0.5 rounded bg-red-600 text-[10px] font-black text-white uppercase tracking-tighter animate-pulse">
+            주의
+          </span>
+        )}
       </div>
 
       {/* Warning banner */}
       {item.warning && (
         <div className="flex flex-col gap-[5px] pl-9">
           <div
-            className="flex flex-row items-center gap-3 p-3 rounded-sm"
-            style={{ background: "#FEE2E2", border: "1px solid #F65746" }}
+            className="flex flex-row items-start gap-3 p-3 rounded-md"
+            style={{ background: "#FEF2F2", border: "1px solid #FEE2E2" }}
           >
-            <svg width="22" height="19" viewBox="0 0 22 19" fill="none" className="shrink-0">
-              <path d="M11 1L21 18H1L11 1Z" fill="#EF4444" />
-              <rect x="10" y="7" width="2" height="6" rx="1" fill="white" />
-              <rect x="10" y="14" width="2" height="2" rx="1" fill="white" />
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" className="shrink-0 mt-0.5">
+              <path d="M12 9V14M12 17.01L12.01 16.998M12 21C16.9706 21 21 16.9706 21 12C21 7.02944 16.9706 3 12 3C7.02944 3 3 7.02944 3 12C3 16.9706 7.02944 21 12 21Z" stroke="#EF4444" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
             <p
-              className="text-[15px] font-medium"
-              style={{ color: "#991B1B", fontFamily: "var(--font-alexandria)" }}
+              className="text-sm font-semibold leading-relaxed"
+              style={{ color: "#991B1B", fontFamily: "var(--font-public-sans)" }}
             >
               {item.warning}
             </p>

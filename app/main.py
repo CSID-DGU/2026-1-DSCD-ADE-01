@@ -305,6 +305,21 @@ async def analyze_single_clause_v2(request: AnalyzeClauseRequest) -> ClauseAnaly
     
     llm_related_laws = await _run_in_executor(_run_llm_summary)
 
+    # 5. 상세 결과에 LLM 분석 내용(이유/위배여부) 매핑
+    # llm_related_laws 는 [{"ref": "...", "summary": "...", "is_violation": bool, ...}] 형태
+    summary_map = {item["ref"]: item for item in llm_related_laws}
+    
+    for doc in law_results:
+        if doc.doc_id in summary_map:
+            doc.warning = summary_map[doc.doc_id]["summary"]
+            doc.is_violation = summary_map[doc.doc_id].get("is_violation", False)
+            
+    for doc in prec_results:
+        # 판례는 doc_id(사건번호)가 summary_map의 ref와 매칭됨
+        if doc.doc_id in summary_map:
+            doc.warning = summary_map[doc.doc_id]["summary"]
+            doc.is_violation = summary_map[doc.doc_id].get("is_violation", False)
+
     return ClauseAnalysisV2Response(
         index=request.clause_index,
         clause=request.clause_text,

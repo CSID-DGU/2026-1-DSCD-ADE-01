@@ -40,6 +40,7 @@ type RelatedLaw = {
   ref: string;
   summary: string;
   content: string;
+  is_violation?: boolean;
 };
 
 type RelatedClause = {
@@ -127,6 +128,20 @@ export default function AnalysisPage() {
 
         // 3. 병렬 분석 실행 (V2: RAG + LLM 요약)
         terms.forEach(async (termText: string, index: number) => {
+          // 상위 6개 공통 특약은 분석을 수행하지 않음
+          if (index < 6) {
+            setClauseResults(prev => ({
+              ...prev,
+              [index]: { ...prev[index], status: "done" }
+            }));
+            setCompletedCount(prev => {
+              const next = prev + 1;
+              if (next === terms.length) setAnalysisStatus("done");
+              return next;
+            });
+            return;
+          }
+
           try {
             const res = await fetch(`${API_BASE}/api/analyze/clause_v2`, {
               method: "POST",
@@ -178,10 +193,12 @@ export default function AnalysisPage() {
               }));
 
               setNotifications(prev => {
+                const isCommon = index < 6;
+                const label = isCommon ? `공통특약 ${index + 1}` : `특약 ${index - 6 + 1}`;
                 const newNotification = {
                   id: Date.now().toString() + "-" + index, // Ensure unique ID
                   clauseIdx: index,
-                  message: `특약 ${index + 1} 분석이 완료되었습니다.`,
+                  message: `${label} 분석이 완료되었습니다.`,
                 };
                 const timeoutId = setTimeout(() => {
                   setNotifications(current => current.filter(n => n.id !== newNotification.id));
@@ -225,10 +242,13 @@ export default function AnalysisPage() {
 
       try {
         const contract = JSON.parse(storedContract);
-        const clausesWithSummaries = specialTerms.map((term, index) => {
-          const res = clauseResults[index];
+        // 상위 6개 공통 특약은 제외하고 7번째(index 6)부터만 리포트 생성 대상으로 전달
+        const targetTerms = specialTerms.slice(6);
+        const clausesWithSummaries = targetTerms.map((term, i) => {
+          const absoluteIndex = i + 6;
+          const res = clauseResults[absoluteIndex];
           return {
-            index: index + 6, // 서버의 COMMON_TERMS_COUNT(6) 이후부터 인덱스 시작
+            index: absoluteIndex,
             clause: term,
             summaries: res?.llmRelatedLaws || []
           };
@@ -344,15 +364,15 @@ export default function AnalysisPage() {
               <summary className="flex items-center gap-2 mb-2 cursor-pointer list-none [&::-webkit-details-marker]:hidden select-none outline-none">
                 <div className="w-1.5 h-6 bg-blue-600 rounded-full" />
                 <h3 className="text-xl font-bold text-gray-900 tracking-tight">계약 전 필수 확인 체크리스트</h3>
-                <ChevronDown className="w-5 h-5 text-gray-400 transition-transform group-open:rotate-180 ml-auto" />
+                <ChevronDown className="w-5 h-5 text-gray-400 transition-transform rotate-180 group-open:rotate-0 ml-auto" />
               </summary>
               <div className="flex flex-col gap-4 mt-4">
                 {reportData.contract_checklist.map((item, idx) => (
-                  <details key={idx} className="group bg-gray-50 border border-gray-100 rounded-lg">
+                  <details key={idx} className="group/check bg-gray-50 border border-gray-100 rounded-lg">
                     <summary className="flex items-center gap-2 p-4 cursor-pointer list-none [&::-webkit-details-marker]:hidden select-none outline-none">
                       <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-sm font-bold flex-shrink-0">{idx + 1}</span>
                       <h4 className="text-base font-semibold text-gray-900">{item.item}</h4>
-                      <ChevronDown className="w-4 h-4 text-gray-400 transition-transform group-open:rotate-180 ml-auto flex-shrink-0" />
+                      <ChevronDown className="w-4 h-4 text-gray-400 transition-transform rotate-180 group-open/check:rotate-0 ml-auto flex-shrink-0" />
                     </summary>
                     <div className="p-4 pt-0">
                       <p className="text-sm text-gray-700 leading-relaxed ml-8">{item.description}</p>
@@ -439,21 +459,24 @@ export default function AnalysisPage() {
 
           {/* 개별 특약 렌더링 */}
           {specialTerms.length > 0 && (
-            <details className="group flex flex-col mt-4" open>
+            <details className="group flex flex-col p-6 rounded-xl border bg-white shadow-sm border-blue-200" open>
               <summary className="flex items-center gap-2 mb-2 cursor-pointer list-none [&::-webkit-details-marker]:hidden select-none outline-none">
                 <div className="w-1.5 h-6 bg-blue-600 rounded-full" />
                 <h3 className="text-xl font-bold text-gray-900 tracking-tight">특약 분석 결과</h3>
-                <ChevronDown className="w-5 h-5 text-gray-400 transition-transform group-open:rotate-180 ml-auto" />
+                <ChevronDown className="w-5 h-5 text-gray-400 transition-transform rotate-180 group-open:rotate-0 ml-auto" />
               </summary>
-              <div className="flex flex-col gap-8 mt-4">
-                {specialTerms.map((term, idx) => {
+              <div className="flex flex-col gap-6 mt-4">
+                {specialTerms.slice(6).map((term, i) => {
+                  const idx = i + 6; // 원래 인덱스 (데이터 조회용)
+                  const displayIdx = i + 1; // 표시용 인덱스 (특약 1, 2...)
+
                   // 법령과 판례 분리 로직 (V2: 개별 특약의 상태에서 가져옴)
                   const llmRelatedLaws = clauseResults[idx]?.llmRelatedLaws || [];
                   const llmLaws = llmRelatedLaws.filter((l: any) => l.type === "법령" || (!l.type && /[법령조항칙]/.test(l.ref))) || [];
                   const llmPrecs = llmRelatedLaws.filter((l: any) => l.type === "판례" || (!l.type && !/[법령조항칙]/.test(l.ref))) || [];
                   
                   // 연관성 분석 로직 (V2: 통합 리포트 데이터에서 가져옴)
-                  const llmRelatedClauses = reportData?.related_clauses_map?.[`특약${idx + 1}`] || [];
+                  const llmRelatedClauses = reportData?.related_clauses_map?.[`특약${displayIdx}`] || [];
 
                   // 판례 제목 포맷팅 함수 (콤마 분리 및 대괄호 처리)
                   const formatPrecTitle = (ref: string) => {
@@ -476,13 +499,13 @@ export default function AnalysisPage() {
                     <div 
                       key={idx} 
                       id={`analysis-result-${idx}`}
-                      className="rounded-xl border bg-white shadow-sm scroll-mt-4"
+                      className="rounded-xl border bg-gray-50/30 scroll-mt-4 overflow-hidden"
                       style={{ borderColor: "#E2E8F0" }}
                     >
-                      <details className="group">
-                        <summary className="flex items-start justify-between gap-4 p-6 border-b border-gray-100 cursor-pointer list-none [&::-webkit-details-marker]:hidden select-none outline-none hover:bg-gray-50 transition-colors rounded-t-xl group-open:rounded-b-none rounded-b-xl">
+                      <details className="group/item">
+                        <summary className="flex items-start justify-between gap-4 p-5 cursor-pointer list-none [&::-webkit-details-marker]:hidden select-none outline-none hover:bg-gray-50 transition-colors">
                           <div className="flex items-center gap-3">
-                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-sm font-bold flex-shrink-0">{idx + 1}</span>
+                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-blue-100 text-blue-700 text-sm font-bold flex-shrink-0">{displayIdx}</span>
                             <h4 className="text-base font-semibold text-gray-900 leading-relaxed">
                               {term}
                             </h4>
@@ -500,36 +523,55 @@ export default function AnalysisPage() {
                                 분석 실패
                               </div>
                             )}
-                            <ChevronDown className="w-5 h-5 text-gray-400 transition-transform group-open:rotate-180 flex-shrink-0" />
+                            <ChevronDown className="w-5 h-5 text-gray-400 transition-transform rotate-180 group-open/item:rotate-0 flex-shrink-0" />
                           </div>
                         </summary>
 
-                        <div className="p-6 pt-4 flex flex-col gap-6">
+                        <div className="p-5 pt-2 border-t border-gray-100 flex flex-col gap-6">
 
                   {/* LLM 요약 (Phase 1 완료 시 즉시 노출) */}
                   {clauseResults[idx]?.status === "done" && (
                     <div className="flex flex-col gap-3">
                       {llmLaws.length > 0 && (
-                        <details className="group border border-blue-200 rounded-lg overflow-hidden">
-                          <summary className="text-sm font-semibold text-blue-900 bg-blue-50 px-4 py-3 cursor-pointer hover:bg-blue-100 select-none">
-                            관련 법령
+                        <details className="group/laws border border-blue-200 rounded-lg overflow-hidden">
+                          <summary className="flex items-center justify-between text-sm font-semibold text-blue-900 bg-blue-50 px-4 py-3 cursor-pointer hover:bg-blue-100 select-none list-none">
+                            <span>관련 법령</span>
+                            <ChevronDown className="w-4 h-4 text-blue-400 transition-transform rotate-180 group-open/laws:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-blue-100">
                             {llmLaws.map((law, lIdx) => (
                               law.summary && (
                                 <div key={`law-sum-${lIdx}`} className="text-sm text-gray-700 leading-relaxed">
-                                  <strong className="block text-gray-900 mb-2">[{law.ref.replace(/_/g, ' ')}]</strong>
+                                  <strong className={`flex items-center gap-2 mb-2 ${law.is_violation ? 'text-red-600' : 'text-gray-900'}`}>
+                                    [{law.ref.replace(/_/g, ' ')}]
+                                    {law.is_violation && (
+                                      <span className="px-1.5 py-0.5 rounded bg-red-600 text-[10px] font-black text-white uppercase tracking-tighter">
+                                        주의
+                                      </span>
+                                    )}
+                                  </strong>
                                   {law.content && (
-                                    <details className="mt-3 p-3 bg-gray-50 border border-gray-100 rounded-lg">
-                                      <summary className="text-xs font-semibold text-gray-700 cursor-pointer select-none">
-                                        원문 보기
+                                    <details className="group/raw-law mt-3 p-3 bg-gray-50 border border-gray-100 rounded-lg">
+                                      <summary className="flex items-center justify-between text-xs font-semibold text-gray-700 cursor-pointer select-none list-none">
+                                        <span>원문 보기</span>
+                                        <ChevronDown className="w-3 h-3 text-gray-400 transition-transform rotate-180 group-open/raw-law:rotate-0" />
                                       </summary>
                                       <p className="mt-2 text-xs whitespace-pre-wrap text-gray-600">
                                         {law.content}
                                       </p>
                                     </details>
                                   )}
-                                  <p className="whitespace-pre-wrap">{law.summary}</p>
+                                  {law.is_violation ? (
+                                    <div className="mt-3 p-4 bg-red-50 border border-red-100 rounded-lg flex flex-col gap-2">
+                                      <div className="flex items-center gap-2 text-red-600 font-bold text-xs">
+                                        <AlertCircle className="w-4 h-4" />
+                                        <span>주의 사항 및 이유</span>
+                                      </div>
+                                      <p className="whitespace-pre-wrap text-red-900 font-medium">{law.summary}</p>
+                                    </div>
+                                  ) : (
+                                    <p className="whitespace-pre-wrap mt-2">{law.summary}</p>
+                                  )}
                                 </div>
                               )
                             ))}
@@ -538,26 +580,45 @@ export default function AnalysisPage() {
                       )}
 
                       {llmPrecs.length > 0 && (
-                        <details className="group border border-green-200 rounded-lg overflow-hidden">
-                          <summary className="text-sm font-semibold text-green-900 bg-green-50 px-4 py-3 cursor-pointer hover:bg-green-100 select-none">
-                            관련 판례
+                        <details className="group/precs border border-green-200 rounded-lg overflow-hidden">
+                          <summary className="flex items-center justify-between text-sm font-semibold text-green-900 bg-green-50 px-4 py-3 cursor-pointer hover:bg-green-100 select-none list-none">
+                            <span>관련 판례</span>
+                            <ChevronDown className="w-4 h-4 text-green-400 transition-transform rotate-180 group-open/precs:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-green-100">
                             {llmPrecs.map((prec, pIdx) => (
                               prec.summary && (
                                 <div key={`prec-sum-${pIdx}`} className="text-sm text-gray-700 leading-relaxed">
-                                  <strong className="block text-gray-900 mb-2">{formatPrecTitle(prec.ref)}</strong>
+                                  <strong className={`flex items-center gap-2 mb-2 ${prec.is_violation ? 'text-red-600' : 'text-gray-900'}`}>
+                                    {formatPrecTitle(prec.ref)}
+                                    {prec.is_violation && (
+                                      <span className="px-1.5 py-0.5 rounded bg-red-600 text-[10px] font-black text-white uppercase tracking-tighter">
+                                        주의
+                                      </span>
+                                    )}
+                                  </strong>
                                   {prec.content && (
-                                    <details className="mt-3 p-3 bg-gray-50 border border-gray-100 rounded-lg">
-                                      <summary className="text-xs font-semibold text-gray-700 cursor-pointer select-none">
-                                        판결 요지 보기
+                                    <details className="group/raw-prec mt-3 p-3 bg-gray-50 border border-gray-100 rounded-lg">
+                                      <summary className="flex items-center justify-between text-xs font-semibold text-gray-700 cursor-pointer select-none list-none">
+                                        <span>판결 요지 보기</span>
+                                        <ChevronDown className="w-3 h-3 text-gray-400 transition-transform rotate-180 group-open/raw-prec:rotate-0" />
                                       </summary>
                                       <p className="mt-2 text-xs whitespace-pre-wrap text-gray-600">
                                         {prec.content}
                                       </p>
                                     </details>
                                   )}
-                                  <p className="whitespace-pre-wrap">{prec.summary}</p>
+                                  {prec.is_violation ? (
+                                    <div className="mt-3 p-4 bg-red-50 border border-red-100 rounded-lg flex flex-col gap-2">
+                                      <div className="flex items-center gap-2 text-red-600 font-bold text-xs">
+                                        <AlertCircle className="w-4 h-4" />
+                                        <span>주의 사항 및 이유</span>
+                                      </div>
+                                      <p className="whitespace-pre-wrap text-red-900 font-medium">{prec.summary}</p>
+                                    </div>
+                                  ) : (
+                                    <p className="whitespace-pre-wrap mt-2">{prec.summary}</p>
+                                  )}
                                 </div>
                               )
                             ))}
@@ -567,9 +628,10 @@ export default function AnalysisPage() {
 
                       {/* 연관성 주의 (Phase 2 완료 후 노출) */}
                       {reportStatus === "done" && llmRelatedClauses.length > 0 && (
-                        <details className="group border border-orange-200 rounded-lg overflow-hidden">
-                          <summary className="text-sm font-semibold text-orange-900 bg-orange-50 px-4 py-3 cursor-pointer hover:bg-orange-100 select-none">
-                            다른 특약과의 연관성 주의
+                        <details className="group/rel border border-orange-200 rounded-lg overflow-hidden">
+                          <summary className="flex items-center justify-between text-sm font-semibold text-orange-900 bg-orange-50 px-4 py-3 cursor-pointer hover:bg-orange-100 select-none list-none">
+                            <span>다른 특약과의 연관성 주의</span>
+                            <ChevronDown className="w-4 h-4 text-orange-400 transition-transform rotate-180 group-open/rel:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-orange-100">
                             <ul className="list-disc pl-5 space-y-4 text-sm text-gray-700 leading-relaxed">

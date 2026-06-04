@@ -168,6 +168,8 @@ class RankedDocument(BaseModel):
     # 문서 내용 (DB에서 조회)
     title: str                # 법령명+조항 or 사건명
     content: str              # child_text or judgment_summary
+    warning: str | None = None
+    is_violation: bool = False
 
 
 class ClauseRanking(BaseModel):
