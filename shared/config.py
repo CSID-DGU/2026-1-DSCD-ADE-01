@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     gcs_bucket: str
 
     # ---- Models (선택값, 기본값 존재) ----
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-2.5-flash-lite"
 
     # ---- Document AI (Document OCR processor) ----
     docai_location: str
