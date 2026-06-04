@@ -54,6 +54,48 @@ class ClauseAnalysisResponse(BaseModel):
     prec_results: list[RankedDocument]  # 판례 (rank 1~TOP_K, 독립)
 
 
+class ClauseWithHits(BaseModel):
+    index: int
+    clause: str
+    laws: list[dict]
+    precs: list[dict]
+
+
+class ReportRequest(BaseModel):
+    property_info: dict
+    common_terms: list[str]
+    clauses_with_hits: list[ClauseWithHits]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# V2 파이프라인 스키마 (완전 비동기/병렬)
+# ──────────────────────────────────────────────────────────────────────
+
+class ClauseAnalysisV2Response(BaseModel):
+    index: int
+    clause: str
+    expansion: ClauseQueryExpansion
+    law_results: list[RankedDocument]   # 법령 (rank 1~TOP_K, 독립)
+    prec_results: list[RankedDocument]  # 판례 (rank 1~TOP_K, 독립)
+    llm_related_laws: list[dict]        # LLM 요약 결과
+
+class ClauseWithSummary(BaseModel):
+    index: int
+    clause: str
+    summaries: list[dict]
+
+class ReportV2Request(BaseModel):
+    property_info: dict
+    common_terms: list[str]
+    clauses_with_summaries: list[ClauseWithSummary]
+
+class ChecklistResponse(BaseModel):
+    contract_checklist: list[dict]
+
+class RelationsResponse(BaseModel):
+    related_clauses_map: dict[str, list[dict]]
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 기존 (레거시)
 # ──────────────────────────────────────────────────────────────────────
