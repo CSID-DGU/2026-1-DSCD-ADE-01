@@ -26,8 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
 
 DEFAULT_SCHEMA_SQL = PROJECT_ROOT / "infra" / "cloud_sql" / "init_schema.sql"
 DEFAULT_PARENT_CSV = PROJECT_ROOT / "data" / "law_chunks" / "law_parent.csv"
-DEFAULT_CHILD_CSV = PROJECT_ROOT / "data" / "law_chunks" / "law_child.csv"
-DEFAULT_CASE_LAW_CSV = PROJECT_ROOT / "data" / "case_law_with_embeddings.csv"
+DEFAULT_CHILD_CSV = PROJECT_ROOT / "data" / "law_chunks" / "law_child_vertex.csv"
+DEFAULT_CASE_LAW_CSV = PROJECT_ROOT / "data" / "case_law_with_embeddings_vertex.csv"
 DEFAULT_QA_JSON = (
     PROJECT_ROOT
     / "data"
@@ -59,8 +59,6 @@ EXPECTED_CHILD_COLUMNS = [
     "paragraph_no",
     "child_text",
     "embed_vertex",
-    "embed_kure",
-    "embed_e5",
 ]
 
 EXPECTED_CASE_LAW_COLUMNS = [
@@ -78,8 +76,6 @@ EXPECTED_CASE_LAW_COLUMNS = [
     "referenced_case",
     "case_detail",
     "embed_vertex",
-    "embed_kure",
-    "embed_e5",
 ]
 
 PARENT_DB_COLUMNS = [
@@ -226,7 +222,7 @@ def to_nullable_int(value: str) -> int | None:
     value = value.strip()
     if value == "":
         return None
-    return int(value)
+    return int(float(value))
 
 
 def normalize_date_value(value: str | None) -> str | None:
@@ -292,28 +288,32 @@ def normalize_pgvector(
 
 
 def read_csv(path: Path, expected_columns: list[str]) -> list[dict[str, str]]:
-    """CSV를 읽고 헤더가 예상한 컬럼과 같은지 확인한다."""
+    """CSV를 읽고 필수 컬럼이 모두 있는지 확인한다. 추가 컬럼은 허용한다."""
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
 
-        if reader.fieldnames != expected_columns:
+        actual = set(reader.fieldnames or [])
+        missing = [c for c in expected_columns if c not in actual]
+        if missing:
             raise ValueError(
-                f"{path} columns mismatch: expected {expected_columns}, "
-                f"got {reader.fieldnames}"
+                f"{path} missing required columns: {missing} "
+                f"(actual: {list(reader.fieldnames)})"
             )
 
         return list(reader)
 
 
 def iter_csv_rows(path: Path, expected_columns: list[str]) -> Iterable[dict[str, str]]:
-    """CSV를 메모리에 전부 올리지 않고 한 행씩 읽는다."""
+    """CSV를 메모리에 전부 올리지 않고 한 행씩 읽는다. 추가 컬럼은 허용한다."""
     with path.open("r", encoding="utf-8-sig", newline="") as file:
         reader = csv.DictReader(file)
 
-        if reader.fieldnames != expected_columns:
+        actual = set(reader.fieldnames or [])
+        missing = [c for c in expected_columns if c not in actual]
+        if missing:
             raise ValueError(
-                f"{path} columns mismatch: expected {expected_columns}, "
-                f"got {reader.fieldnames}"
+                f"{path} missing required columns: {missing} "
+                f"(actual: {list(reader.fieldnames)})"
             )
 
         yield from reader
@@ -458,8 +458,10 @@ def validate_law_rows(
     for row in child_rows:
         to_nullable_int(row["paragraph_no"])
         parse_pgvector(row["embed_vertex"])
-        parse_pgvector(row["embed_kure"], expected_dimensions=1024)
-        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
+        if "embed_kure" in row:
+            parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        if "embed_e5" in row:
+            parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
 
 def validate_child_rows_stream(
@@ -486,8 +488,10 @@ def validate_child_rows_stream(
 
         to_nullable_int(row["paragraph_no"])
         parse_pgvector(row["embed_vertex"])
-        parse_pgvector(row["embed_kure"], expected_dimensions=1024)
-        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
+        if "embed_kure" in row:
+            parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        if "embed_e5" in row:
+            parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
     if duplicate_clause_keys:
         raise ValueError(f"duplicate clause_key: {duplicate_clause_keys[:5]}")
@@ -508,8 +512,10 @@ def validate_case_law_rows(case_rows: list[dict[str, str]]) -> None:
         parse_date_yyyymmdd(row["judgment_date"])
         to_nullable_int(row["court_type_code"])
         parse_pgvector(row["embed_vertex"])
-        parse_pgvector(row["embed_kure"], expected_dimensions=1024)
-        parse_pgvector(row["embed_e5"], expected_dimensions=1024)
+        if "embed_kure" in row:
+            parse_pgvector(row["embed_kure"], expected_dimensions=1024)
+        if "embed_e5" in row:
+            parse_pgvector(row["embed_e5"], expected_dimensions=1024)
 
 
 def map_parent_row(row: dict[str, str]) -> dict[str, Any]:
@@ -539,8 +545,8 @@ def map_child_row(row: dict[str, str], *, parent_id: int) -> dict[str, Any]:
         "paragraph_no": to_nullable_int(row["paragraph_no"]),
         "child_text": row["child_text"],
         "embed_vertex": parse_pgvector(row["embed_vertex"]),
-        "embed_kure": parse_pgvector(row["embed_kure"], expected_dimensions=1024),
-        "embed_e5": parse_pgvector(row["embed_e5"], expected_dimensions=1024),
+        "embed_kure": parse_pgvector(row.get("embed_kure", ""), expected_dimensions=1024),
+        "embed_e5": parse_pgvector(row.get("embed_e5", ""), expected_dimensions=1024),
     }
 
 
@@ -560,8 +566,8 @@ def map_case_law_row(row: dict[str, str]) -> dict[str, Any]:
         "referenced_case": to_nullable_text(row["referenced_case"]),
         "case_detail": to_nullable_text(row["case_detail"]),
         "embed_vertex": parse_pgvector(row["embed_vertex"]),
-        "embed_kure": parse_pgvector(row["embed_kure"], expected_dimensions=1024),
-        "embed_e5": parse_pgvector(row["embed_e5"], expected_dimensions=1024),
+        "embed_kure": parse_pgvector(row.get("embed_kure", ""), expected_dimensions=1024),
+        "embed_e5": parse_pgvector(row.get("embed_e5", ""), expected_dimensions=1024),
     }
 
 
