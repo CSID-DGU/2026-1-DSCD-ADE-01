@@ -159,10 +159,12 @@ export function DocumentPanel({
               {specialTerms.slice(0, 6).map((text, i) => (
                 <div
                   key={`common-${i}`}
-                  className="flex flex-col gap-1 rounded-lg border border-gray-100 bg-gray-50/50 p-3 text-left"
+                  className="flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left"
                 >
-                  <span className="text-[9px] font-bold text-gray-300 uppercase">공통특약 {i + 1}</span>
-                  <div className="text-xs text-gray-600 leading-relaxed font-medium">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase">
+                    공통특약 {i + 1}
+                  </span>
+                  <div className="text-sm text-gray-800 leading-relaxed font-medium">
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
                       components={MarkdownComponents}
@@ -187,17 +189,15 @@ export function DocumentPanel({
             </h3>
             <div className="flex flex-col gap-4">
               {generalTerms.map((term, i) => (
-                <div key={i} className="flex flex-col gap-1 px-2">
-                  <p className="text-xs font-bold text-gray-500">{term.title}</p>
-                  <div className="p-3 border rounded bg-white border-gray-100 overflow-hidden">
-                    <div className="text-xs text-gray-600 leading-relaxed">
-                      <ReactMarkdown 
-                        remarkPlugins={[remarkGfm]}
-                        components={MarkdownComponents}
-                      >
-                        {preprocessMarkdown(term.text)}
-                      </ReactMarkdown>
-                    </div>
+                <div key={i} className="flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left">
+                  <span className="text-[10px] font-bold text-gray-400 uppercase">{term.title}</span>
+                  <div className="text-sm text-gray-800 leading-relaxed font-medium">
+                    <ReactMarkdown 
+                      remarkPlugins={[remarkGfm]}
+                      components={MarkdownComponents}
+                    >
+                      {preprocessMarkdown(term.text)}
+                    </ReactMarkdown>
                   </div>
                 </div>
               ))}
