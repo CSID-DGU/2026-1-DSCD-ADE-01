@@ -1,6 +1,5 @@
 "use client";
 
-import { Bell, Settings, User } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 export type NavTab = "analysis" | "chatbot";
@@ -81,53 +80,11 @@ export function TopNavBar({
           )}
         </div>
 
-        {/* Center: Pill tabs */}
-        <div
-          className="inline-flex shrink-0 justify-self-center rounded-lg p-0.5"
-          style={{ background: "rgba(255,255,255,0.1)" }}
-        >
-          {(["analysis", "chatbot"] as NavTab[]).map((tab) => {
-            const label = tab === "analysis" ? "계약서 분석" : "AI 챗봇";
-            const isActive = tab === activeTab;
-            return (
-              <button
-                key={tab}
-                type="button"
-                className={`${tabBase} ${isActive ? tabActive : tabInactive}`}
-                style={{ fontFamily: "var(--font-alexandria)" }}
-                onClick={() => onTabChange?.(tab)}
-                aria-pressed={isActive}
-              >
-                {label}
-              </button>
-            );
-          })}
-        </div>
+        {/* Center: Empty (Removed) */}
+        <div />
 
-        {/* Right: Icon buttons */}
-        <div className="flex items-center gap-1 justify-self-end border-l border-white/0 pl-0 sm:border-white/15 sm:pl-3">
-          <button
-            type="button"
-            className="rounded-md p-2 text-white/80 transition hover:bg-white/10 hover:text-white"
-            aria-label="알림"
-          >
-            <Bell className="h-5 w-5" />
-          </button>
-          <button
-            type="button"
-            className="rounded-md p-2 text-white/80 transition hover:bg-white/10 hover:text-white"
-            aria-label="설정"
-          >
-            <Settings className="h-5 w-5" />
-          </button>
-          <button
-            type="button"
-            className="rounded-md p-2 text-white/80 transition hover:bg-white/10 hover:text-white"
-            aria-label="프로필"
-          >
-            <User className="h-5 w-5" />
-          </button>
-        </div>
+        {/* Right: Empty (Removed) */}
+        <div />
       </div>
     </header>
   );
