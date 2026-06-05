@@ -5,7 +5,8 @@ import { TopNavBar } from "@/components/TopNavBar";
 import { DocumentPanel } from "@/components/analysis/DocumentPanel";
 import { LawSection } from "@/components/analysis/LawSection";
 import { PrecedentSection } from "@/components/analysis/PrecedentSection";
-import { BottomActionBar } from "@/components/analysis/BottomActionBar";
+// import { BottomActionBar } from "@/components/analysis/BottomActionBar";
+import { ChatBot } from "@/components/analysis/ChatBot";
 import type { LawItem } from "@/components/analysis/LawSection";
 import type { PrecedentItem } from "@/components/analysis/PrecedentSection";
 import { Loader2, AlertCircle, ChevronDown, X } from "lucide-react";
@@ -67,6 +68,7 @@ export default function AnalysisPage() {
   const [reportData, setReportData] = useState<FinalReportOutput | null>(null);
   const [reportStatus, setReportStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
   const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [isChatOpen, setIsChatOpen] = useState(false);
 
   // 알림 관리 (최대 5개, 초과 시 순차 제거)
   useEffect(() => {
@@ -535,7 +537,7 @@ export default function AnalysisPage() {
                       {llmLaws.length > 0 && (
                         <details className="group/laws border border-blue-200 rounded-lg overflow-hidden">
                           <summary className="flex items-center justify-between text-sm font-semibold text-blue-900 bg-blue-50 px-4 py-3 cursor-pointer hover:bg-blue-100 select-none list-none">
-                            <span>관련 법령</span>
+                            <span>관련된 법령</span>
                             <ChevronDown className="w-4 h-4 text-blue-400 transition-transform rotate-180 group-open/laws:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-blue-100">
@@ -582,7 +584,7 @@ export default function AnalysisPage() {
                       {llmPrecs.length > 0 && (
                         <details className="group/precs border border-green-200 rounded-lg overflow-hidden">
                           <summary className="flex items-center justify-between text-sm font-semibold text-green-900 bg-green-50 px-4 py-3 cursor-pointer hover:bg-green-100 select-none list-none">
-                            <span>관련 판례</span>
+                            <span>유사한 분쟁 사례</span>
                             <ChevronDown className="w-4 h-4 text-green-400 transition-transform rotate-180 group-open/precs:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-green-100">
@@ -630,7 +632,7 @@ export default function AnalysisPage() {
                       {reportStatus === "done" && llmRelatedClauses.length > 0 && (
                         <details className="group/rel border border-orange-200 rounded-lg overflow-hidden">
                           <summary className="flex items-center justify-between text-sm font-semibold text-orange-900 bg-orange-50 px-4 py-3 cursor-pointer hover:bg-orange-100 select-none list-none">
-                            <span>다른 특약과의 연관성 주의</span>
+                            <span>함께 확인해야 할 특약</span>
                             <ChevronDown className="w-4 h-4 text-orange-400 transition-transform rotate-180 group-open/rel:rotate-0" />
                           </summary>
                           <div className="flex flex-col gap-4 p-4 bg-white border-t border-orange-100">
@@ -648,7 +650,7 @@ export default function AnalysisPage() {
                     </div>
                   )}
 
-                  {/* 분석 결과 (로딩 완료 시에만) */}
+                  {/* 분석 결과 (로딩 완료 시에만) - 관련 법령/판례 20개 표시 부분 제거 요청으로 주석 처리
                   {clauseResults[idx]?.status !== "loading" && (
                     <div className="flex flex-col gap-8 pt-4 border-t border-gray-100">
                       {clauseResults[idx].laws.length > 0 ? (
@@ -662,6 +664,7 @@ export default function AnalysisPage() {
                       )}
                     </div>
                   )}
+                  */}
                         </div>
                       </details>
                     </div>
@@ -679,7 +682,22 @@ export default function AnalysisPage() {
         </section>
       </div>
 
-      <BottomActionBar />
+      {/* <BottomActionBar onChatbot={() => setIsChatOpen(true)} /> */}
+      
+      {/* 챗봇 컴포넌트 */}
+      <ChatBot 
+        isOpen={isChatOpen}
+        onOpen={() => setIsChatOpen(true)}
+        onClose={() => setIsChatOpen(false)}
+        context={{
+          report: reportData,
+          clauses: Object.values(clauseResults).map(res => ({
+            laws: res.llmRelatedLaws,
+            status: res.status
+          })),
+          rawContract: typeof window !== "undefined" ? JSON.parse(sessionStorage.getItem("ade.analysis.contract") || "{}") : null
+        }}
+      />
     </div>
   );
 }
