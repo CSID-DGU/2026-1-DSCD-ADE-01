@@ -135,6 +135,7 @@ class GeminiClient:
         system_instruction: str | None = None,
         response_schema: type | None = None,
         temperature: float | None = None,
+        tools: list[Any] | None = None,
     ) -> Any:
         """텍스트 또는 파일을 입력받아 생성 결과를 반환한다.
 
@@ -154,6 +155,8 @@ class GeminiClient:
             None이면 ``response.text`` (str)를 반환한다.
         temperature:
             생성 온도. None이면 모델 기본값을 사용한다.
+        tools:
+            모델이 사용할 수 있는 도구(함수) 리스트.
 
         Raises
         ------
@@ -170,6 +173,8 @@ class GeminiClient:
             config_kwargs["response_schema"] = response_schema
         if temperature is not None:
             config_kwargs["temperature"] = temperature
+        if tools is not None:
+            config_kwargs["tools"] = tools
 
         config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
@@ -209,6 +214,44 @@ class GeminiClient:
             "Gemini returned empty response: "
             f"{_summarize_empty_response(response)}"
         )
+
+    def chat(
+        self,
+        message: str,
+        *,
+        history: list[Any] | None = None,
+        model: str | None = None,
+        system_instruction: str | None = None,
+        tools: list[Any] | None = None,
+        temperature: float | None = None,
+    ) -> Any:
+        """대화형 세션을 시작하고 자동 도구 실행을 지원하는 채팅 응답 객체를 반환한다."""
+        from google.genai import types
+
+        config_kwargs: dict[str, Any] = {}
+        if system_instruction is not None:
+            config_kwargs["system_instruction"] = system_instruction
+        if tools is not None:
+            config_kwargs["tools"] = tools
+            # 자동 도구 실행 활성화
+            config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(
+                disable=False
+            )
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
+
+        config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+        try:
+            chat = self._client.chats.create(
+                model=model or self._default_model,
+                config=config,
+                history=history,
+            )
+            response = chat.send_message(message)
+            return response
+        except Exception as exc:
+            raise LLMError(str(exc)) from exc
 
 
 gemini_client: GeminiClient = GeminiClient()

@@ -182,3 +182,19 @@ class ClauseRanking(BaseModel):
 class RerankingResponse(BaseModel):
     contract: LeaseContract
     clauses: list[ClauseRanking]
+
+# ──────────────────────────────────────────────────────────────────────
+# 챗봇용 스키마
+# ──────────────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    context: dict[str, Any]
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[dict] | None = None
