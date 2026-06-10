@@ -47,12 +47,14 @@ from app.schemas import (
     RetrievalResponse,
     ChatRequest,
     ChatResponse,
+    ClauseRewriteRequest,
+    ClauseRewriteResponse,
 )
 from pipeline.preprocessing.schema import LeaseContract
 from pipeline.retrieval.query_expansion.query_expansion_schema import ClauseQueryExpansion
 from pipeline.retrieval.retrieval_service import retrieval_service
 from pipeline.generation.report_generator import generate_report_from_data, ReportOutput
-from pipeline.generation.report_generator_v2 import generate_clause_summary, generate_final_report, FinalReportOutput, COMMON_TERMS_COUNT
+from pipeline.generation.report_generator_v2 import generate_clause_summary, generate_final_report, generate_clause_rewrite, FinalReportOutput, COMMON_TERMS_COUNT
 from shared.db.connection import get_db_client
 from shared.storage.gcs_client import get_gcs_client
 
@@ -228,6 +230,47 @@ async def get_parsed_document(doc_id: str, client_id: str):
         raise HTTPException(status_code=404, detail="과거 분석 데이터를 찾을 수 없습니다.")
 
 
+@app.delete("/api/documents/{doc_id}")
+async def delete_document(doc_id: str, client_id: str):
+    """DB와 GCS에서 문서 데이터를 영구 삭제한다."""
+    db = get_db_client()
+    gcs = get_gcs_client()
+
+    # 1. 문서 존재 여부 확인 및 경로 확보
+    row = db.fetch_one(
+        text("SELECT doc_id FROM document_history WHERE doc_id = :doc_id AND client_id = :client_id"),
+        {"doc_id": doc_id, "client_id": client_id}
+    )
+
+    if not row:
+        raise HTTPException(status_code=404, detail="삭제할 문서를 찾을 수 없습니다.")
+
+    # 2. GCS 파일 삭제
+    # 업로드 시 blob_name 형식: raw: f"clients/{client_id}/raw/{doc_id}.pdf", parsed: f"clients/{client_id}/parsed/{doc_id}.json"
+    raw_blob = f"clients/{client_id}/raw/{doc_id}.pdf"
+    parsed_blob = f"clients/{client_id}/parsed/{doc_id}.json"
+
+    try:
+        if gcs.exists(raw_blob):
+            gcs.delete(raw_blob)
+        if gcs.exists(parsed_blob):
+            gcs.delete(parsed_blob)
+    except Exception as e:
+        log.warning(f"GCS 파일 일부 삭제 실패 (doc={doc_id}): {e}")
+
+    # 3. DB 레코드 삭제
+    try:
+        db.execute(
+            text("DELETE FROM document_history WHERE doc_id = :doc_id AND client_id = :client_id"),
+            {"doc_id": doc_id, "client_id": client_id}
+        )
+    except Exception as e:
+        log.error(f"DB 레코드 삭제 실패 (doc={doc_id}): {e}")
+        raise HTTPException(status_code=500, detail="데이터베이스 삭제 중 오류가 발생했습니다.")
+
+    return {"message": "문서가 성공적으로 삭제되었습니다."}
+
+
 @app.post("/api/analyze/clause", response_model=ClauseAnalysisResponse)
 async def analyze_single_clause(request: AnalyzeClauseRequest) -> ClauseAnalysisResponse:
     """단일 특약에 대해 쿼리 확장 -> 하이브리드 검색 -> 리랭킹 파이프라인을 실행한다."""
@@ -304,11 +347,14 @@ async def analyze_single_clause_v2(request: AnalyzeClauseRequest) -> ClauseAnaly
         laws_json = json.dumps(laws_dict, sort_keys=True)
         precs_json = json.dumps(precs_dict, sort_keys=True)
         return generate_clause_summary(request.clause_text, laws_json, precs_json)
-    
-    llm_related_laws = await _run_in_executor(_run_llm_summary)
+
+    llm_result = await _run_in_executor(_run_llm_summary)
+    clause_one_line_summary = llm_result.get("clause_one_line_summary", "") if llm_result else ""
+    clause_interpretation = llm_result.get("clause_interpretation", "") if llm_result else ""
+    llm_related_laws = llm_result.get("related_laws", []) if llm_result else []
 
     # 5. 상세 결과에 LLM 분석 내용(이유/위배여부) 매핑
-    # llm_related_laws 는 [{"ref": "...", "summary": "...", "is_violation": bool, ...}] 형태
+    # llm_related_laws: [{"ref", "type", "content", "summary", "is_violation", "is_caution"}]
     summary_map = {item["ref"]: item for item in llm_related_laws}
     
     for doc in law_results:
@@ -329,6 +375,8 @@ async def analyze_single_clause_v2(request: AnalyzeClauseRequest) -> ClauseAnaly
         law_results=law_results,
         prec_results=prec_results,
         llm_related_laws=llm_related_laws,
+        clause_one_line_summary=clause_one_line_summary or None,
+        clause_interpretation=clause_interpretation or None,
     )
 
 
@@ -344,6 +392,24 @@ async def analyze_report_v2(request: ReportV2Request) -> FinalReportOutput:
         )
 
     return await _run_in_executor(_run_final_report_gen)
+
+
+@app.post("/api/analyze/rewrite_clause", response_model=ClauseRewriteResponse)
+async def rewrite_clause(request: ClauseRewriteRequest) -> ClauseRewriteResponse:
+    """위반 가능성이 있는 특약을 법령에 맞게 재작성한다."""
+    def _run_rewrite():
+        return generate_clause_rewrite(
+            original_clause=request.clause_text,
+            violation_laws=request.violation_laws,
+            all_related_laws=request.all_related_laws,
+        )
+
+    result = await _run_in_executor(_run_rewrite)
+    return ClauseRewriteResponse(
+        rewritten_clause=result.get("rewritten_clause", ""),
+        reason=result.get("reason", ""),
+    )
+
 
 # ──────────────────────────────────────────────────────────────────────
 # 기존 (레거시) API 들 - 필요시 삭제 가능
@@ -683,56 +749,57 @@ def search_legal_info(query: str) -> dict:
     from pipeline.retrieval.query_expansion.retrieval_adapter import build_retrieval_payload
     from pipeline.retrieval.retrieval_service import retrieval_service
     
-    # 1. 쿼리 확장 및 페이로드 구성
-    expansion = expand_clause(query)
-    payload = build_retrieval_payload(expansion, clause_text=query)
+    if not retrieval_service.is_ready:
+        log.error("search_legal_info: RetrievalService가 아직 준비되지 않았습니다.")
+        return {"laws": [], "precedents": []}
     
-    # 2. 하이브리드 검색 수행
-    res = retrieval_service.retrieve(payload)
-    
-    # 3. 각 검색 방식의 상위 결과 추출 및 통합 (중복 제거)
-    # BM25 상위 결과
-    bm25_law_ids = [hit["doc_id"] for hit in res["bm25"] if hit["source_type"] == "law"][:5]
-    bm25_prec_ids = [hit["doc_id"] for hit in res["bm25"] if hit["source_type"] == "precedent"][:5]
-    
-    # Semantic(Dense) 상위 결과
-    dense_law_ids = [hit["doc_id"] for hit in res["dense"] if hit["source_type"] == "law"][:5]
-    dense_prec_ids = [hit["doc_id"] for hit in res["dense"] if hit["source_type"] == "precedent"][:5]
-    
-    # 통합 및 순서 유지 중복 제거
-    law_ids = list(dict.fromkeys(bm25_law_ids + dense_law_ids))
-    prec_ids = list(dict.fromkeys(bm25_prec_ids + dense_prec_ids))
-    
-    # 최종 상위 N개로 제한 (컨텍스트 크기 관리)
-    law_ids = law_ids[:8]
-    prec_ids = prec_ids[:8]
-    
-    laws_content = _fetch_law_content(law_ids)
-    precs_content = _fetch_prec_content(prec_ids)
-    
-    # 4. 결과 정리
-    final_laws = []
-    for lid in law_ids:
-        if lid in laws_content:
-            c = laws_content[lid]
-            final_laws.append({
-                "title": f"{c.get('law_name')} 제{c.get('article_no')}조",
-                "content": c.get("child_text") or c.get("parent_text")
-            })
-            
-    final_precs = []
-    for pid in prec_ids:
-        if pid in precs_content:
-            c = precs_content[pid]
-            final_precs.append({
-                "title": c.get("case_name") or pid,
-                "content": c.get("judgment_summary") or c.get("issue")
-            })
-            
-    return {
-        "laws": final_laws,
-        "precedents": final_precs
-    }
+    try:
+        # 1. 쿼리 확장 및 페이로드 구성
+        expansion = expand_clause(query)
+        payload = build_retrieval_payload(expansion, clause_text=query)
+        
+        # 2. 하이브리드 검색 수행
+        res = retrieval_service.retrieve(payload)
+        
+        # 3. 각 검색 방식의 상위 결과 추출 및 통합 (중복 제거)
+        bm25_law_ids = [hit["doc_id"] for hit in res["bm25"] if hit["source_type"] == "law"][:5]
+        bm25_prec_ids = [hit["doc_id"] for hit in res["bm25"] if hit["source_type"] == "precedent"][:5]
+        
+        dense_law_ids = [hit["doc_id"] for hit in res["dense"] if hit["source_type"] == "law"][:5]
+        dense_prec_ids = [hit["doc_id"] for hit in res["dense"] if hit["source_type"] == "precedent"][:5]
+        
+        law_ids = list(dict.fromkeys(bm25_law_ids + dense_law_ids))[:8]
+        prec_ids = list(dict.fromkeys(bm25_prec_ids + dense_prec_ids))[:8]
+        
+        laws_content = _fetch_law_content(law_ids)
+        precs_content = _fetch_prec_content(prec_ids)
+        
+        # 4. 결과 정리
+        final_laws = []
+        for lid in law_ids:
+            if lid in laws_content:
+                c = laws_content[lid]
+                final_laws.append({
+                    "title": f"{c.get('law_name')} 제{c.get('article_no')}조",
+                    "content": c.get("child_text") or c.get("parent_text")
+                })
+                
+        final_precs = []
+        for pid in prec_ids:
+            if pid in precs_content:
+                c = precs_content[pid]
+                final_precs.append({
+                    "title": c.get("case_name") or pid,
+                    "content": c.get("judgment_summary") or c.get("issue")
+                })
+                
+        return {
+            "laws": final_laws,
+            "precedents": final_precs
+        }
+    except Exception as e:
+        log.error(f"search_legal_info 실행 중 오류 발생: {e}")
+        return {"laws": [], "precedents": []}
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -743,16 +810,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
     from google.genai import types
     
     system_instruction = (
-        "당신은 부동산 계약 전문 분석 AI 'ADE'입니다.\n"
+        "당신은 부동산 계약 전문 분석 AI 'CLARA'입니다.\n"
         "제공된 정보를 바탕으로 사용자의 질문에 답변하세요.\n"
         "참고 가능한 정보는 다음과 같습니다:\n"
         "1. **파싱된 원본 문서**: 계약서의 전체 조항과 특약 사항 원문입니다.\n"
         "2. **분석 리포트**: AI가 분석한 핵심 체크리스트와 각 특약별 법적 검토 결과입니다.\n"
-        "3. **대화 히스토리**: 이전 대화 맥락을 파악하여 자연스러운 대화를 이어가세요.\n\n"
-        "추가적인 법률 정보나 판례가 필요하다고 판단되면 'search_legal_info' 도구를 사용하여 DB를 검색하세요.\n"
+        "3. **재작성된 특약(rewrittenClauses)**: 법령 위배 가능성이 있는 특약에 대해 사용자가 재작성을 요청한 경우, 수정된 특약 원문과 재작성 이유가 포함됩니다. 사용자가 재작성된 특약에 대해 물어볼 경우 이 데이터를 우선 참고하세요.\n"
+        "4. **대화 히스토리**: 이전 대화 맥락을 파악하여 자연스러운 대화를 이어가세요.\n"
+        "4. **특약 번호 규칙 (반드시 준수)**: 화면에서 특약 목록의 첫 6개(인덱스 0~5)는 '공통특약'이고, 7번째(인덱스 6)부터가 '특약'입니다.\n"
+        "   - '특약 N' 또는 'N번 특약' → 공통특약을 **완전히 제외**한 일반 특약의 N번째. 즉 인덱스 (6 + N - 1)번에 해당합니다.\n"
+        "   - '공통특약 N' → 공통 특약의 N번째. 즉 인덱스 (N - 1)번에 해당합니다.\n"
+        "   - **핵심 원칙**: 사용자가 '공통특약'이라는 단어를 명시적으로 말하지 않는 한, '특약'은 절대로 공통특약을 가리키지 않습니다. '특약 2번'은 공통특약 2번이 아니라 인덱스 7번(일반 특약 2번째)입니다.\n\n"
         "답변은 친절하고 전문적이어야 하며, 한국어로 답변하세요.\n"
         "모든 답변은 **Markdown** 문법을 사용하여 가독성 있게 작성하세요.\n"
         "원본 문서와 분석 리포트의 내용이 상충할 경우, 분석 리포트를 우선하되 원문 내용을 함께 인용하세요.\n"
+        "**중요**: 제공된 파싱된 원본 문서 및 분석 리포트에 명시되지 않은 내용(예: 계약서에 없는 일반적인 법률 조항이나 판례에 대한 질문 등)에 대해서는 절대 당신의 내장 지식을 사용하여 추측성 답변(환각)을 하지 마세요. 반드시 '해당 내용은 현재 분석 중인 계약서나 리포트에서 확인할 수 없어 정확한 답변이 어렵습니다.'라고 정중히 거절하세요.\n"
         "확실하지 않은 법률적 판단은 반드시 변호사 등 전문가와 상담할 것을 권고하는 문구를 포함하세요."
     )
     
@@ -786,18 +858,16 @@ async def chat(request: ChatRequest) -> ChatResponse:
     last_user_msg = all_msgs[-1].content
     
     try:
-        # 툴 실행 결과를 가져오기 위해 직접 세션을 관리하거나,
-        # SDK가 제공하는 최종 응답 구조를 파싱해야 함.
         from google.genai import types
         
         async def _chat_with_tools_manual():
-            # 세션 생성 (자동 도구 실행 설정 추가)
+            # 도구 사용 일시 중단 (사용자 요청)
             chat_session = gemini_client._client.chats.create(
                 model=settings.gemini_model,
                 config=types.GenerateContentConfig(
                     system_instruction=full_system_instruction,
-                    tools=[search_legal_info],
-                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False),
+                    # tools=[search_legal_info],
+                    # automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False),
                     temperature=0.0
                 ),
                 history=history
@@ -807,27 +877,12 @@ async def chat(request: ChatRequest) -> ChatResponse:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(_clause_executor, chat_session.send_message, last_user_msg)
             
-            # 자동 실행이 켜져 있으면 이미 루프가 끝난 상태.
+            # 도구를 사용하지 않으므로 빈 소스 반환
             all_sources = []
-            
-            # chat_session.history에는 [..., User, Model(ToolCall), Tool(ToolResponse), Model(FinalAnswer)] 가 들어있음.
-            # SDK 버전에 따라 history 속성 대신 get_history() 메서드를 사용해야 할 수 있음.
-            for content in reversed(chat_session.get_history()):
-                if content.role == "tool":
-                    for part in content.parts:
-                        if part.function_response:
-                            res_val = part.function_response.response
-                            if isinstance(res_val, dict):
-                                if "laws" in res_val:
-                                    all_sources.extend(res_val["laws"])
-                                if "precedents" in res_val:
-                                    all_sources.extend(res_val["precedents"])
-                if content.role == "user": 
-                    break
                     
             answer_text = "".join([p.text for p in response.candidates[0].content.parts if p.text])
             if not answer_text:
-                answer_text = "검색 결과를 정리해 드립니다."
+                answer_text = "답변을 생성할 수 없습니다."
                 
             return answer_text, all_sources
 
