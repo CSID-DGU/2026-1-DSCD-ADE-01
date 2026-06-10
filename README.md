@@ -245,7 +245,7 @@
 pip install -r requirements.txt
 
 # 환경 변수 설정
-cp .env.example .env
+cp .env
 # .env 파일에 API KEY 및 DB 정보 입력
 
 # 서버 실행
