@@ -12,6 +12,10 @@ COPY requirements.txt ./requirements.txt
 COPY app/requirements.txt ./app_requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt -r app_requirements.txt
 
+# Presidio NLP 엔진(Spacy) 모델을 빌드 시점에 미리 다운로드 (런타임 지연 방지)
+RUN python -m spacy download en_core_web_lg && \
+    python -m spacy download ko_core_news_sm
+
 COPY app ./app
 COPY pipeline ./pipeline
 COPY shared ./shared
