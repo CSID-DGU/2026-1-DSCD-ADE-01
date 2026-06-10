@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronRight, FileText, Loader2 } from "lucide-react";
+import { ChevronRight, FileText, Loader2, X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
@@ -14,11 +14,15 @@ type DocumentHistoryItem = {
 function RecentDocumentCard({ 
   doc, 
   onSelect,
-  isSelecting 
+  onDelete,
+  isSelecting,
+  isDeleting
 }: { 
   doc: DocumentHistoryItem; 
   onSelect: (doc: DocumentHistoryItem) => void;
+  onDelete: (doc: DocumentHistoryItem) => void;
   isSelecting: boolean;
+  isDeleting: boolean;
 }) {
   const dateStr = new Date(doc.created_at).toLocaleDateString("ko-KR", {
     year: "numeric",
@@ -28,7 +32,7 @@ function RecentDocumentCard({
 
   return (
     <article
-      className="rounded-lg border p-4 shadow-sm transition"
+      className="relative rounded-lg border p-4 shadow-sm transition"
       style={{
         background: "white",
         borderColor: "#E2E8F0",
@@ -40,11 +44,24 @@ function RecentDocumentCard({
         (e.currentTarget as HTMLElement).style.borderColor = "#E2E8F0";
       }}
     >
+      {/* 삭제 버튼 */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onDelete(doc);
+        }}
+        disabled={isDeleting || isSelecting}
+        className="absolute top-3 right-3 p-1 text-gray-300 hover:text-red-500 transition-colors rounded-md hover:bg-red-50 disabled:opacity-30"
+        title="삭제"
+      >
+        {isDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />}
+      </button>
+
       <div className="flex items-start gap-3">
         <div className="mt-0.5 rounded bg-blue-50 p-2 text-blue-600">
           <FileText className="h-4 w-4" />
         </div>
-        <div className="min-w-0 flex-1">
+        <div className="min-w-0 flex-1 pr-6">
           <h4
             className="truncate text-sm font-medium leading-snug"
             style={{ color: "#1A1C1E", fontFamily: "var(--font-public-sans)" }}
@@ -65,7 +82,7 @@ function RecentDocumentCard({
         <button
           type="button"
           onClick={() => onSelect(doc)}
-          disabled={isSelecting}
+          disabled={isSelecting || isDeleting}
           className="inline-flex items-center gap-1 text-xs font-medium hover:underline disabled:opacity-50"
           style={{ color: "#002045", fontFamily: "var(--font-public-sans)" }}
         >
@@ -81,6 +98,7 @@ export function RecentDocumentPanel() {
   const [docs, setDocs] = useState<DocumentHistoryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [selectingId, setSelectingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchHistory() {
@@ -133,6 +151,32 @@ export function RecentDocumentPanel() {
     }
   }
 
+  async function handleDelete(doc: DocumentHistoryItem) {
+    const clientId = localStorage.getItem("ade.client_id");
+    if (!clientId) return;
+
+    if (!confirm(`'${doc.file_name}' 분석 기록을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없으며 실제 파일도 함께 삭제됩니다.`)) {
+      return;
+    }
+
+    setDeletingId(doc.doc_id);
+    try {
+      const res = await fetch(`${API_BASE}/api/documents/${doc.doc_id}?client_id=${clientId}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        setDocs(prev => prev.filter(d => d.doc_id !== doc.doc_id));
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "삭제 실패");
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "삭제 중 오류가 발생했습니다.");
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <aside
       className="flex h-full min-h-0 w-full flex-col gap-4 overflow-y-auto lg:w-[320px] lg:shrink-0 lg:border-l lg:pl-6"
@@ -156,7 +200,9 @@ export function RecentDocumentPanel() {
               <RecentDocumentCard 
                 doc={doc} 
                 onSelect={handleSelect} 
+                onDelete={handleDelete}
                 isSelecting={selectingId === doc.doc_id}
+                isDeleting={deletingId === doc.doc_id}
               />
             </li>
           ))}
