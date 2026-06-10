@@ -30,6 +30,10 @@
   --color-border-upload: #C4C6CF;
 }
 
+html {
+  font-size: 18px;
+}
+
 body {
   background: var(--color-page-bg);
   font-family: var(--font-public-sans), sans-serif;
