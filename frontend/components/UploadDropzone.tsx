@@ -6,7 +6,7 @@ import { FileUp, Loader2 } from "lucide-react";
 
 const MAX_BYTES = 20 * 1024 * 1024;
 const ACCEPT =
-  ".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  ".pdf,application/pdf";
 
 type UploadDropzoneProps = {
   onFileSelect: (file: File) => void;
@@ -23,12 +23,9 @@ function formatSize(bytes: number): string {
 
 function isAllowedFile(file: File): boolean {
   const lower = file.name.toLowerCase();
-  if (lower.endsWith(".pdf") || lower.endsWith(".docx")) return true;
+  if (lower.endsWith(".pdf")) return true;
   const t = file.type;
-  return (
-    t === "application/pdf" ||
-    t === "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-  );
+  return t === "application/pdf";
 }
 
 export function UploadDropzone({ onFileSelect, isLoading }: UploadDropzoneProps) {
@@ -41,7 +38,7 @@ export function UploadDropzone({ onFileSelect, isLoading }: UploadDropzoneProps)
     if (!file) return;
     setError(null);
     if (!isAllowedFile(file)) {
-      setError("PDF 또는 DOCX 파일만 업로드할 수 있습니다.");
+      setError("PDF 파일만 업로드할 수 있습니다.");
       setPreview(null);
       return;
     }
@@ -122,7 +119,7 @@ export function UploadDropzone({ onFileSelect, isLoading }: UploadDropzoneProps)
         className="mt-2 text-xs"
         style={{ color: "#74777F", fontFamily: "var(--font-public-sans)" }}
       >
-        지원 형식: PDF, DOCX · 최대 용량: 20MB
+        지원 형식: PDF · 최대 용량: 20MB
       </p>
 
       {error && (
