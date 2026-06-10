@@ -13,13 +13,15 @@ type DocumentPanelProps = {
   specialTerms: string[];
   generalTerms: GeneralTerm[];
   onTermClick?: (index: number) => void;
+  activeIdx?: number | null;
 };
 
-export function DocumentPanel({ 
-  contractTitle, 
-  specialTerms, 
+export function DocumentPanel({
+  contractTitle,
+  specialTerms,
   generalTerms,
-  onTermClick 
+  onTermClick,
+  activeIdx,
 }: DocumentPanelProps) {
 
   // Simple pre-processor for messy table syntax
@@ -116,19 +118,24 @@ export function DocumentPanel({
         {/* 1. 분석 대상 특약 사항 */}
         {specialTerms.length > 0 && (
           <div className="flex flex-col gap-4">
-            <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
+            <h3 className="px-2 text-base font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
               특약 사항
             </h3>
             <div className="flex flex-col gap-2">
               {specialTerms.slice(6).map((text, i) => {
                 const absoluteIndex = i + 6;
+                const isActive = activeIdx === absoluteIndex;
                 return (
                   <button
                     key={`target-${i}`}
                     onClick={() => onTermClick?.(absoluteIndex)}
-                    className="group flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left transition hover:border-blue-300 hover:bg-blue-50 hover:shadow-sm"
+                    className={`group flex flex-col gap-1 rounded-lg border p-4 text-left transition hover:border-blue-300 hover:bg-blue-50 hover:shadow-sm ${
+                      isActive
+                        ? "border-blue-400 bg-blue-50 shadow-sm ring-2 ring-blue-200"
+                        : "border-gray-200 bg-white"
+                    }`}
                   >
-                    <span className="text-[10px] font-bold text-gray-400 uppercase group-hover:text-blue-500">
+                    <span className={`text-xs font-bold uppercase ${isActive ? "text-blue-600" : "text-gray-400 group-hover:text-blue-500"}`}>
                       특약 {i + 1}
                     </span>
                     <div className="text-sm text-gray-800 leading-relaxed font-medium">
@@ -152,7 +159,7 @@ export function DocumentPanel({
         {/* 2. 공통 특약 */}
         {specialTerms.length >= 6 && (
           <div className="flex flex-col gap-4">
-            <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
+            <h3 className="px-2 text-base font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
               공통 특약
             </h3>
             <div className="flex flex-col gap-2">
@@ -161,7 +168,7 @@ export function DocumentPanel({
                   key={`common-${i}`}
                   className="flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left"
                 >
-                  <span className="text-[10px] font-bold text-gray-400 uppercase">
+                  <span className="text-xs font-bold text-gray-400 uppercase">
                     공통특약 {i + 1}
                   </span>
                   <div className="text-sm text-gray-800 leading-relaxed font-medium">
@@ -184,13 +191,13 @@ export function DocumentPanel({
         {/* 3. 일반 조항 섹션 */}
         {generalTerms.length > 0 && (
           <div className="flex flex-col gap-4">
-            <h3 className="px-2 text-sm font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
+            <h3 className="px-2 text-base font-black text-blue-700 uppercase tracking-widest border-l-4 border-blue-600">
               일반 조항
             </h3>
             <div className="flex flex-col gap-4">
               {generalTerms.map((term, i) => (
                 <div key={i} className="flex flex-col gap-1 rounded-lg border border-gray-200 bg-white p-4 text-left">
-                  <span className="text-[10px] font-bold text-gray-400 uppercase">{term.title}</span>
+                  <span className="text-xs font-bold text-gray-400 uppercase">{term.title}</span>
                   <div className="text-sm text-gray-800 leading-relaxed font-medium">
                     <ReactMarkdown 
                       remarkPlugins={[remarkGfm]}
