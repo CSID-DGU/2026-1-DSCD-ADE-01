@@ -78,6 +78,8 @@ class ClauseAnalysisV2Response(BaseModel):
     law_results: list[RankedDocument]   # 법령 (rank 1~TOP_K, 독립)
     prec_results: list[RankedDocument]  # 판례 (rank 1~TOP_K, 독립)
     llm_related_laws: list[dict]        # LLM 요약 결과
+    clause_one_line_summary: str | None = None  # 한 줄 요약
+    clause_interpretation: str | None = None    # 특약 해석 (일반인용)
 
 class ClauseWithSummary(BaseModel):
     index: int
@@ -186,6 +188,16 @@ class RerankingResponse(BaseModel):
 # ──────────────────────────────────────────────────────────────────────
 # 챗봇용 스키마
 # ──────────────────────────────────────────────────────────────────────
+
+class ClauseRewriteRequest(BaseModel):
+    clause_text: str
+    violation_laws: list[dict]   # is_violation=True 항목
+    all_related_laws: list[dict] # 전체 related_laws
+
+class ClauseRewriteResponse(BaseModel):
+    rewritten_clause: str
+    reason: str
+
 
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"

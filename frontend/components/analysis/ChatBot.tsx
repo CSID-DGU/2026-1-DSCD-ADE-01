@@ -15,16 +15,19 @@ type ChatBotProps = {
   isOpen: boolean;
   onOpen: () => void;
   onClose: () => void;
+  showNudge?: boolean;
   context: {
     report: any;
     clauses: any;
+    rewrittenClauses?: Record<string, { rewrittenClause: string; reason: string }>;
     rawContract?: any;
   };
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
-export function ChatBot({ isOpen, onOpen, onClose, context }: ChatBotProps) {
+export function ChatBot({ isOpen, onOpen, onClose, showNudge = false, context }: ChatBotProps) {
+  const [nudgeDismissed, setNudgeDismissed] = useState(false);
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
@@ -92,12 +95,31 @@ export function ChatBot({ isOpen, onOpen, onClose, context }: ChatBotProps) {
     <>
       {/* Floating FAB Button */}
       {!isOpen && (
-        <button
-          onClick={onOpen}
-          className="fixed bottom-8 right-8 z-50 flex items-center justify-center w-14 h-14 bg-[#002045] text-white rounded-full shadow-2xl hover:bg-[#003366] transition-all transform hover:scale-110"
-        >
-          <MessageCircle className="w-7 h-7" />
-        </button>
+        <div className="fixed bottom-8 right-8 z-50 flex flex-col items-center gap-2">
+          {/* 유도 말풍선 */}
+          {showNudge && !nudgeDismissed && (
+            <div className="relative whitespace-nowrap">
+              <div className="flex items-center gap-2 pl-3 pr-2 py-2 rounded-xl bg-[#002045] text-white text-xs font-medium shadow-lg">
+                <span>추가적으로 궁금한 점을 물어보세요!</span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setNudgeDismissed(true); }}
+                  className="text-white/60 hover:text-white transition-colors leading-none font-bold text-sm"
+                  aria-label="닫기"
+                >
+                  ×
+                </button>
+              </div>
+              {/* 아래 화살표 */}
+              <div className="absolute left-1/2 -translate-x-1/2 -bottom-[5px] w-2.5 h-2.5 rotate-45 bg-[#002045] z-10" />
+            </div>
+          )}
+          <button
+            onClick={onOpen}
+            className="flex items-center justify-center w-14 h-14 bg-[#002045] text-white rounded-full shadow-2xl hover:bg-[#003366] transition-all transform hover:scale-110"
+          >
+            <MessageCircle className="w-7 h-7" />
+          </button>
+        </div>
       )}
 
       {/* Chat Window */}
@@ -107,7 +129,7 @@ export function ChatBot({ isOpen, onOpen, onClose, context }: ChatBotProps) {
           <div className="flex items-center justify-between px-5 py-4 bg-[#002045] text-white">
             <div className="flex items-center gap-2">
               <Bot className="w-5 h-5" />
-              <span className="font-bold text-lg">ADE AI 챗봇</span>
+              <span className="font-bold text-lg">CLARA 챗봇</span>
             </div>
             <button
               onClick={onClose}
